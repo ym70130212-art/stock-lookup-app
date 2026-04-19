@@ -1,0 +1,32 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f7fb;
+  --card: #ffffff;
+  --text: #111827;
+  --muted: #6b7280;
+  --border: #d1d5db;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --error-bg: #fff1f2;
+  --error-text: #be123c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+a {
+  color: inherit;
+}
+
+button, textarea {
+  font: inherit;
+}
