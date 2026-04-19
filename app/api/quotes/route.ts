@@ -10,41 +10,29 @@ type StockMasterRow = {
   aliases?: string[];
 };
 
-type ResultRow = {
+type QuoteResult = {
   input: string;
   code: string;
   name: string;
-  price: string;
-  change: string;
+  price: number | null;
+  change: number | null;
+  changePercent: number | null;
+  symbol: string;
+  error?: string;
 };
 
-function normalizeText(text: string): string {
+function normalize(text: string): string {
   return text.trim().toLowerCase();
 }
 
-function formatPrice(value: number): string {
-  return `${value.toLocaleString('ja-JP', {
-    minimumFractionDigits: 1,
-    maximumFractionDigits: 1,
-  })}円`;
-}
-
-function formatChange(change: number, changePercent: number): string {
-  const sign = change >= 0 ? '+' : '';
-  return `${sign}${change.toLocaleString('ja-JP', {
-    minimumFractionDigits: 1,
-    maximumFractionDigits: 1,
-  })}円 (${sign}${changePercent.toFixed(2)}%)`;
-}
-
-function findStockByNameOrAlias(input: string): StockMasterRow | null {
-  const normalized = normalizeText(input);
+function findByNameOrAlias(input: string): StockMasterRow | null {
+  const normalized = normalize(input);
   const rows = stockMaster as StockMasterRow[];
 
   for (const row of rows) {
-    const nameMatched = normalizeText(row.name).includes(normalized);
+    const nameMatched = normalize(row.name).includes(normalized);
     const aliasMatched = (row.aliases || []).some((alias) =>
-      normalizeText(alias).includes(normalized)
+      normalize(alias).includes(normalized)
     );
 
     if (nameMatched || aliasMatched) {
@@ -53,6 +41,21 @@ function findStockByNameOrAlias(input: string): StockMasterRow | null {
   }
 
   return null;
+}
+
+function formatGptLine(row: QuoteResult): string {
+  if (row.error || row.price === null || row.change === null || row.changePercent === null) {
+    return `${row.input} 該当銘柄または株価を取得できませんでした`;
+  }
+
+  const sign = row.change >= 0 ? '+' : '';
+  return `${row.code} ${row.name}(${row.input}) ${row.price.toLocaleString('ja-JP', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })}円 前日比${sign}${row.change.toLocaleString('ja-JP', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })}円(${sign}${row.changePercent.toFixed(2)}%)`;
 }
 
 export async function POST(req: NextRequest) {
@@ -65,7 +68,7 @@ export async function POST(req: NextRequest) {
       .filter((v) => v.length > 0)
       .slice(0, 20);
 
-    const results: ResultRow[] = [];
+    const results: QuoteResult[] = [];
 
     for (const input of cleanedInputs) {
       try {
@@ -73,30 +76,77 @@ export async function POST(req: NextRequest) {
         let name = '';
         let symbol = '';
 
-        // 4桁コードなら JSON を見ずにそのまま東証コードとして扱う
+        // 4桁コードなら直接取得
         if (/^\d{4}$/.test(input)) {
           code = input;
-          name = input; // 名前不明でも最低限コードは表示
           symbol = `${input}.T`;
-        } else {
-          // 企業名・略称は今まで通り JSON で解決
-          const matched = findStockByNameOrAlias(input);
 
-          if (!matched) {
+          const quote = await yf.quote(symbol);
+
+          const regularMarketPrice = Number(quote.regularMarketPrice);
+          const regularMarketPreviousClose = Number(quote.regularMarketPreviousClose);
+
+          if (
+            !Number.isFinite(regularMarketPrice) ||
+            !Number.isFinite(regularMarketPreviousClose) ||
+            regularMarketPreviousClose === 0
+          ) {
             results.push({
               input,
-              code: '-',
-              name: '-',
-              price: '-',
-              change: '銘柄候補が見つかりませんでした',
+              code,
+              name: input,
+              price: null,
+              change: null,
+              changePercent: null,
+              symbol,
+              error: '株価データを取得できませんでした',
             });
             continue;
           }
 
-          code = matched.code;
-          name = matched.name;
-          symbol = `${matched.code}.T`;
+          name =
+            typeof quote.longName === 'string' && quote.longName.trim()
+              ? quote.longName
+              : typeof quote.shortName === 'string' && quote.shortName.trim()
+              ? quote.shortName
+              : input;
+
+          results.push({
+            input,
+            code,
+            name,
+            price: regularMarketPrice,
+            change: regularMarketPrice - regularMarketPreviousClose,
+            changePercent:
+              ((regularMarketPrice - regularMarketPreviousClose) /
+                regularMarketPreviousClose) *
+              100,
+            symbol,
+          });
+
+          continue;
         }
+
+        // 企業名・略称はJSONで解決
+        const matched = findByNameOrAlias(input);
+
+        if (!matched) {
+          results.push({
+            input,
+            code: '',
+            name: '',
+            price: null,
+            change: null,
+            changePercent: null,
+            symbol: '',
+            error: '銘柄候補が見つかりませんでした',
+          });
+          continue;
+        }
+
+        code = matched.code;
+        name = matched.name;
+        symbol = `${matched.code}.T`;
 
         const quote = await yf.quote(symbol);
 
@@ -112,29 +162,37 @@ export async function POST(req: NextRequest) {
             input,
             code,
             name,
-            price: '-',
-            change: '株価データを取得できませんでした',
+            price: null,
+            change: null,
+            changePercent: null,
+            symbol,
+            error: '株価データを取得できませんでした',
           });
           continue;
         }
-
-        const diff = regularMarketPrice - regularMarketPreviousClose;
-        const diffPercent = (diff / regularMarketPreviousClose) * 100;
 
         results.push({
           input,
           code,
           name,
-          price: formatPrice(regularMarketPrice),
-          change: formatChange(diff, diffPercent),
+          price: regularMarketPrice,
+          change: regularMarketPrice - regularMarketPreviousClose,
+          changePercent:
+            ((regularMarketPrice - regularMarketPreviousClose) /
+              regularMarketPreviousClose) *
+            100,
+          symbol,
         });
       } catch {
         results.push({
           input,
-          code: '-',
-          name: '-',
-          price: '-',
-          change: '株価取得中にエラーが発生しました',
+          code: /^\d{4}$/.test(input) ? input : '',
+          name: /^\d{4}$/.test(input) ? input : '',
+          price: null,
+          change: null,
+          changePercent: null,
+          symbol: /^\d{4}$/.test(input) ? `${input}.T` : '',
+          error: '株価取得中にエラーが発生しました',
         });
       }
     }
@@ -142,18 +200,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       fetchedAt: new Date().toISOString(),
       results,
-      gptText: results
-        .map((row) => {
-          if (row.code === '-' || row.price === '-') {
-            return `${row.input} 該当銘柄または株価を取得できませんでした`;
-          }
-          return `${row.code} ${row.name}(${row.input}) ${row.price} 前日比${row.change}`;
-        })
-        .join('\n'),
+      gptText: results.map(formatGptLine).join('\n'),
     });
   } catch {
     return NextResponse.json(
-      { error: '不正なリクエストです' },
+      {
+        fetchedAt: new Date().toISOString(),
+        results: [],
+        gptText: '',
+        error: '不正なリクエストです',
+      },
       { status: 400 }
     );
   }
