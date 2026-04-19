@@ -171,7 +171,7 @@ export async function POST(req: NextRequest) {
         }
 
         code = resolved.code;
-        name = resolved.name;
+        name = resolved?.name || quote.longName || quote.shortName || input;
         symbol = `${resolved.code}.T`;
 
         try {
