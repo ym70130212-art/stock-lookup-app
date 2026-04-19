@@ -103,6 +103,7 @@ export async function POST(req: NextRequest) {
     }
 
     const limitedInputs = rawInputs.slice(0, 20);
+    const masterRows = stockMaster as StockMasterRow[];
 
     const results: QuoteResult[] = await Promise.all(
       limitedInputs.map(async (input) => {
@@ -110,6 +111,7 @@ export async function POST(req: NextRequest) {
         let name = '';
         let symbol = '';
 
+        // 4桁コードなら直接取得
         if (/^\d{4}$/.test(input)) {
           code = input;
           symbol = `${input}.T`;
@@ -125,12 +127,15 @@ export async function POST(req: NextRequest) {
               quote.regularMarketChangePercent ??
               (change !== null && prevClose ? (change / prevClose) * 100 : null);
 
+            const matchedByCode = masterRows.find((row) => row.code === input);
+
             name =
-              typeof quote.longName === 'string' && quote.longName.trim()
+              matchedByCode?.name ||
+              (typeof quote.longName === 'string' && quote.longName.trim()
                 ? quote.longName
                 : typeof quote.shortName === 'string' && quote.shortName.trim()
                   ? quote.shortName
-                  : input;
+                  : input);
 
             return {
               input,
@@ -155,6 +160,7 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        // 企業名・略称はJSONで解決
         const resolved = resolveStockByName(input);
 
         if (!resolved) {
@@ -171,7 +177,7 @@ export async function POST(req: NextRequest) {
         }
 
         code = resolved.code;
-        name = resolved?.name || quote.longName || quote.shortName || input;
+        name = resolved.name;
         symbol = `${resolved.code}.T`;
 
         try {
