@@ -86,14 +86,25 @@ function toPasteLine(result: QuoteResult): string {
   return `${result.code} ${result.name}(${result.input}) ${formatNumber(result.price)}円 前日比${changeSign}${formatNumber(result.change)}円(${pctSign}${formatNumber(result.changePercent, 2)}%)`;
 }
 
+function parseInputs(body: any): string[] {
+  const src = body?.inputs;
+
+  if (Array.isArray(src)) {
+    return src
+      .map((v) => String(v).trim())
+      .filter(Boolean);
+  }
+
+  return String(src ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-
-    const rawInputs = String(body.inputs ?? '')
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+    const rawInputs = parseInputs(body);
 
     if (rawInputs.length === 0) {
       return NextResponse.json(
@@ -111,7 +122,6 @@ export async function POST(req: NextRequest) {
         let name = '';
         let symbol = '';
 
-        // 4桁コードなら直接取得
         if (/^\d{4}$/.test(input)) {
           code = input;
           symbol = `${input}.T`;
@@ -160,7 +170,6 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // 企業名・略称はJSONで解決
         const resolved = resolveStockByName(input);
 
         if (!resolved) {
