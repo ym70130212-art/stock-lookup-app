@@ -62,14 +62,28 @@ function resolveStockByName(input: string): StockMasterRow | null {
   return null;
 }
 
-function formatNumber(value: number | null, digits = 1): string {
-  if (value === null || Number.isNaN(value)) return '取得失敗';
-  return new Intl.NumberFormat('ja-JP', {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  }).format(value);
+// ★ 追加：配列／文字列両対応
+function parseInputs(body: any): string[] {
+  const src = body?.inputs;
+
+  if (Array.isArray(src)) {
+    return src.map((v) => String(v).trim()).filter(Boolean);
+  }
+
+  return String(src ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
+// ★ 追加：時刻フォーマット固定
+function formatTimestamp(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+// ★ ここが最重要：出力フォーマット完全固定
 function toPasteLine(result: QuoteResult): string {
   if (
     result.error ||
@@ -77,28 +91,17 @@ function toPasteLine(result: QuoteResult): string {
     result.change === null ||
     result.changePercent === null
   ) {
-    return `${result.input} 該当銘柄または株価を取得できませんでした`;
+    return `${result.code || result.input} ${result.name || "-"} 取得失敗`;
   }
 
-  const changeSign = result.change >= 0 ? '+' : '';
-  const pctSign = result.changePercent >= 0 ? '+' : '';
+  const price = Math.round(result.price);
+  const change = Math.round(result.change);
+  const pct = result.changePercent;
 
-  return `${result.code} ${result.name}(${result.input}) ${formatNumber(result.price)}円 前日比${changeSign}${formatNumber(result.change)}円(${pctSign}${formatNumber(result.changePercent, 2)}%)`;
-}
+  const changeStr = `${change >= 0 ? "+" : ""}${change}`;
+  const pctStr = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
 
-function parseInputs(body: any): string[] {
-  const src = body?.inputs;
-
-  if (Array.isArray(src)) {
-    return src
-      .map((v) => String(v).trim())
-      .filter(Boolean);
-  }
-
-  return String(src ?? '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  return `${result.code} ${result.name} ${price} ${changeStr} (${pctStr})`;
 }
 
 export async function POST(req: NextRequest) {
@@ -122,30 +125,32 @@ export async function POST(req: NextRequest) {
         let name = '';
         let symbol = '';
 
+        // 4桁コード
         if (/^\d{4}$/.test(input)) {
           code = input;
           symbol = `${input}.T`;
 
           try {
             const quote = await yf.quote(symbol);
+
             const price = quote.regularMarketPrice ?? null;
             const prevClose = quote.regularMarketPreviousClose ?? null;
+
             const change =
               quote.regularMarketChange ??
               (price !== null && prevClose !== null ? price - prevClose : null);
+
             const changePercent =
               quote.regularMarketChangePercent ??
               (change !== null && prevClose ? (change / prevClose) * 100 : null);
 
-            const matchedByCode = masterRows.find((row) => row.code === input);
+            const matched = masterRows.find((row) => row.code === input);
 
             name =
-              matchedByCode?.name ||
-              (typeof quote.longName === 'string' && quote.longName.trim()
-                ? quote.longName
-                : typeof quote.shortName === 'string' && quote.shortName.trim()
-                  ? quote.shortName
-                  : input);
+              matched?.name ||
+              quote.longName ||
+              quote.shortName ||
+              input;
 
             return {
               input,
@@ -155,7 +160,7 @@ export async function POST(req: NextRequest) {
               change,
               changePercent,
               symbol,
-            } satisfies QuoteResult;
+            };
           } catch (error) {
             return {
               input,
@@ -165,11 +170,12 @@ export async function POST(req: NextRequest) {
               change: null,
               changePercent: null,
               symbol,
-              error: error instanceof Error ? error.message : '株価取得に失敗しました',
-            } satisfies QuoteResult;
+              error: '取得失敗',
+            };
           }
         }
 
+        // 名前検索
         const resolved = resolveStockByName(input);
 
         if (!resolved) {
@@ -181,21 +187,24 @@ export async function POST(req: NextRequest) {
             change: null,
             changePercent: null,
             symbol: '-',
-            error: '銘柄候補が見つかりませんでした',
-          } satisfies QuoteResult;
+            error: '銘柄不明',
+          };
         }
 
         code = resolved.code;
         name = resolved.name;
-        symbol = `${resolved.code}.T`;
+        symbol = `${code}.T`;
 
         try {
           const quote = await yf.quote(symbol);
+
           const price = quote.regularMarketPrice ?? null;
           const prevClose = quote.regularMarketPreviousClose ?? null;
+
           const change =
             quote.regularMarketChange ??
             (price !== null && prevClose !== null ? price - prevClose : null);
+
           const changePercent =
             quote.regularMarketChangePercent ??
             (change !== null && prevClose ? (change / prevClose) * 100 : null);
@@ -208,7 +217,7 @@ export async function POST(req: NextRequest) {
             change,
             changePercent,
             symbol,
-          } satisfies QuoteResult;
+          };
         } catch (error) {
           return {
             input,
@@ -218,32 +227,28 @@ export async function POST(req: NextRequest) {
             change: null,
             changePercent: null,
             symbol,
-            error: error instanceof Error ? error.message : '株価取得に失敗しました',
-          } satisfies QuoteResult;
+            error: '取得失敗',
+          };
         }
       })
     );
 
+    // ★ 出力生成（最重要）
     const now = new Date();
-    const fetchedAt = new Intl.DateTimeFormat('ja-JP', {
-      dateStyle: 'short',
-      timeStyle: 'medium',
-      timeZone: 'Asia/Tokyo',
-    }).format(now);
+    const fetchedAt = formatTimestamp(now);
 
-    const pasteText = results.map(toPasteLine).join('\n');
+    const pasteText =
+      `取得時刻: ${fetchedAt}\n\n` +
+      results.map(toPasteLine).join('\n');
 
     return NextResponse.json({
       fetchedAt,
       results,
       pasteText,
-      note: 'Yahoo Finance系の非公式データに依存するため、遅延・取得失敗・仕様変更の可能性があります。重要な判断前には証券会社画面で確認してください。',
     });
   } catch (error) {
     return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : '不明なエラーが発生しました',
-      },
+      { error: '不明なエラーが発生しました' },
       { status: 500 }
     );
   }
