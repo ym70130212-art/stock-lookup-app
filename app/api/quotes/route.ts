@@ -62,7 +62,6 @@ function resolveStockByName(input: string): StockMasterRow | null {
   return null;
 }
 
-// ★ 追加：配列／文字列両対応
 function parseInputs(body: any): string[] {
   const src = body?.inputs;
 
@@ -76,14 +75,27 @@ function parseInputs(body: any): string[] {
     .filter(Boolean);
 }
 
-// ★ 追加：時刻フォーマット固定
+// 日本時間で固定
 function formatTimestamp(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
+  const parts = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
 
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const map = Object.fromEntries(
+    parts
+      .filter((p) => p.type !== 'literal')
+      .map((p) => [p.type, p.value])
+  ) as Record<string, string>;
+
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}`;
 }
 
-// ★ ここが最重要：出力フォーマット完全固定
 function toPasteLine(result: QuoteResult): string {
   if (
     result.error ||
@@ -91,15 +103,15 @@ function toPasteLine(result: QuoteResult): string {
     result.change === null ||
     result.changePercent === null
   ) {
-    return `${result.code || result.input} ${result.name || "-"} 取得失敗`;
+    return `${result.code || result.input} ${result.name || '-'} 取得失敗`;
   }
 
   const price = Math.round(result.price);
   const change = Math.round(result.change);
   const pct = result.changePercent;
 
-  const changeStr = `${change >= 0 ? "+" : ""}${change}`;
-  const pctStr = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
+  const changeStr = `${change >= 0 ? '+' : ''}${change}`;
+  const pctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
 
   return `${result.code} ${result.name} ${price} ${changeStr} (${pctStr})`;
 }
@@ -125,7 +137,6 @@ export async function POST(req: NextRequest) {
         let name = '';
         let symbol = '';
 
-        // 4桁コード
         if (/^\d{4}$/.test(input)) {
           code = input;
           symbol = `${input}.T`;
@@ -161,7 +172,7 @@ export async function POST(req: NextRequest) {
               changePercent,
               symbol,
             };
-          } catch (error) {
+          } catch {
             return {
               input,
               code,
@@ -175,7 +186,6 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // 名前検索
         const resolved = resolveStockByName(input);
 
         if (!resolved) {
@@ -218,7 +228,7 @@ export async function POST(req: NextRequest) {
             changePercent,
             symbol,
           };
-        } catch (error) {
+        } catch {
           return {
             input,
             code,
@@ -233,7 +243,6 @@ export async function POST(req: NextRequest) {
       })
     );
 
-    // ★ 出力生成（最重要）
     const now = new Date();
     const fetchedAt = formatTimestamp(now);
 
@@ -246,7 +255,7 @@ export async function POST(req: NextRequest) {
       results,
       pasteText,
     });
-  } catch (error) {
+  } catch {
     return NextResponse.json(
       { error: '不明なエラーが発生しました' },
       { status: 500 }
