@@ -33,6 +33,8 @@ export default function Page() {
 
   const handleSearch = async () => {
     const trimmed = input.trim();
+
+    // 検索時だけ未入力エラーを出す
     if (!trimmed) {
       setQuotes([]);
       setError("銘柄コードまたは名称を入力してください。");
@@ -76,7 +78,10 @@ export default function Page() {
         <input
           type="text"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            if (error) setError("");
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               handleSearch();
