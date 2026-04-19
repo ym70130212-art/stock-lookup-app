@@ -1,174 +1,160 @@
 import { NextRequest, NextResponse } from 'next/server';
 import yahooFinance from 'yahoo-finance2';
-const yf = new yahooFinance();
 import stockMaster from '../../../data/jp-stocks.json';
+
+const yf = new yahooFinance();
 
 type StockMasterRow = {
   code: string;
   name: string;
-  aliases: string[];
+  aliases?: string[];
 };
 
-type QuoteResult = {
+type ResultRow = {
   input: string;
   code: string;
   name: string;
-  price: number | null;
-  change: number | null;
-  changePercent: number | null;
-  symbol: string;
-  error?: string;
+  price: string;
+  change: string;
 };
 
-function normalize(text: string): string {
-  return text
-    .trim()
-    .toLowerCase()
-    .replace(/[\s　・\-－_]/g, '')
-    .replace(/ホールディングス/g, 'hd')
-    .replace(/グループ/g, 'group')
-    .replace(/株式会社/g, '');
+function normalizeText(text: string): string {
+  return text.trim().toLowerCase();
 }
 
-function resolveStock(input: string): StockMasterRow | null {
-  const normalizedInput = normalize(input);
+function formatPrice(value: number): string {
+  return `${value.toLocaleString('ja-JP', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })}円`;
+}
 
-  const exactAlias = (stockMaster as StockMasterRow[]).find((row) =>
-    row.aliases.some((alias) => normalize(alias) === normalizedInput)
-  );
-  if (exactAlias) return exactAlias;
+function formatChange(change: number, changePercent: number): string {
+  const sign = change >= 0 ? '+' : '';
+  return `${sign}${change.toLocaleString('ja-JP', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })}円 (${sign}${changePercent.toFixed(2)}%)`;
+}
 
-  const exactName = (stockMaster as StockMasterRow[]).find(
-    (row) => normalize(row.name) === normalizedInput
-  );
-  if (exactName) return exactName;
+function findStockByNameOrAlias(input: string): StockMasterRow | null {
+  const normalized = normalizeText(input);
+  const rows = stockMaster as StockMasterRow[];
 
-  const partialAlias = (stockMaster as StockMasterRow[]).find((row) =>
-    row.aliases.some((alias) => normalize(alias).includes(normalizedInput) || normalizedInput.includes(normalize(alias)))
-  );
-  if (partialAlias) return partialAlias;
+  for (const row of rows) {
+    const nameMatched = normalizeText(row.name).includes(normalized);
+    const aliasMatched = (row.aliases || []).some((alias) =>
+      normalizeText(alias).includes(normalized)
+    );
 
-  const partialName = (stockMaster as StockMasterRow[]).find(
-    (row) => normalize(row.name).includes(normalizedInput) || normalizedInput.includes(normalize(row.name))
-  );
-  if (partialName) return partialName;
-
-  if (/^\d{4}$/.test(input.trim())) {
-    const codeMatch = (stockMaster as StockMasterRow[]).find((row) => row.code === input.trim());
-    if (codeMatch) return codeMatch;
+    if (nameMatched || aliasMatched) {
+      return row;
+    }
   }
 
   return null;
 }
 
-function formatNumber(value: number | null, digits = 1): string {
-  if (value === null || Number.isNaN(value)) return '取得失敗';
-  return new Intl.NumberFormat('ja-JP', {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  }).format(value);
-}
-
-function toPasteLine(result: QuoteResult): string {
-  if (result.error || result.price === null || result.change === null || result.changePercent === null) {
-    return `${result.input} 該当銘柄または株価を取得できませんでした`;
-  }
-
-  const changeSign = result.change >= 0 ? '+' : '';
-  const pctSign = result.changePercent >= 0 ? '+' : '';
-
-  return `${result.code} ${result.name}(${result.input}) ${formatNumber(result.price)}円 前日比${changeSign}${formatNumber(result.change)}円(${pctSign}${formatNumber(result.changePercent, 2)}%)`;
-}
-
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const rawInputs = String(body.inputs ?? '')
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+    const inputs: string[] = Array.isArray(body.inputs) ? body.inputs : [];
 
-    if (rawInputs.length === 0) {
-      return NextResponse.json({ error: '入力が空です。1行に1銘柄ずつ入力してください。' }, { status: 400 });
+    const cleanedInputs = inputs
+      .map((v) => String(v).trim())
+      .filter((v) => v.length > 0)
+      .slice(0, 20);
+
+    const results: ResultRow[] = [];
+
+    for (const input of cleanedInputs) {
+      try {
+        let code = '';
+        let name = '';
+        let symbol = '';
+
+        // 4桁コードなら JSON を見ずにそのまま東証コードとして扱う
+        if (/^\d{4}$/.test(input)) {
+          code = input;
+          name = input; // 名前不明でも最低限コードは表示
+          symbol = `${input}.T`;
+        } else {
+          // 企業名・略称は今まで通り JSON で解決
+          const matched = findStockByNameOrAlias(input);
+
+          if (!matched) {
+            results.push({
+              input,
+              code: '-',
+              name: '-',
+              price: '-',
+              change: '銘柄候補が見つかりませんでした',
+            });
+            continue;
+          }
+
+          code = matched.code;
+          name = matched.name;
+          symbol = `${matched.code}.T`;
+        }
+
+        const quote = await yf.quote(symbol);
+
+        const regularMarketPrice = Number(quote.regularMarketPrice);
+        const regularMarketPreviousClose = Number(quote.regularMarketPreviousClose);
+
+        if (
+          !Number.isFinite(regularMarketPrice) ||
+          !Number.isFinite(regularMarketPreviousClose) ||
+          regularMarketPreviousClose === 0
+        ) {
+          results.push({
+            input,
+            code,
+            name,
+            price: '-',
+            change: '株価データを取得できませんでした',
+          });
+          continue;
+        }
+
+        const diff = regularMarketPrice - regularMarketPreviousClose;
+        const diffPercent = (diff / regularMarketPreviousClose) * 100;
+
+        results.push({
+          input,
+          code,
+          name,
+          price: formatPrice(regularMarketPrice),
+          change: formatChange(diff, diffPercent),
+        });
+      } catch {
+        results.push({
+          input,
+          code: '-',
+          name: '-',
+          price: '-',
+          change: '株価取得中にエラーが発生しました',
+        });
+      }
     }
 
-    const limitedInputs = rawInputs.slice(0, 20);
-
-    const results: QuoteResult[] = await Promise.all(
-      limitedInputs.map(async (input) => {
-        const resolved = resolveStock(input);
-
-        if (!resolved) {
-          return {
-            input,
-            code: '-',
-            name: '-',
-            price: null,
-            change: null,
-            changePercent: null,
-            symbol: '-',
-            error: '銘柄候補が見つかりませんでした',
-          } satisfies QuoteResult;
-        }
-
-        const symbol = `${resolved.code}.T`;
-
-        try {
-          const quote = await yf.quote(symbol);
-          const price = quote.regularMarketPrice ?? null;
-          const prevClose = quote.regularMarketPreviousClose ?? null;
-          const change =
-            quote.regularMarketChange ??
-            (price !== null && prevClose !== null ? price - prevClose : null);
-          const changePercent =
-            quote.regularMarketChangePercent ??
-            (change !== null && prevClose ? (change / prevClose) * 100 : null);
-
-          return {
-            input,
-            code: resolved.code,
-            name: resolved.name,
-            price,
-            change,
-            changePercent,
-            symbol,
-          } satisfies QuoteResult;
-        } catch (error) {
-          return {
-            input,
-            code: resolved.code,
-            name: resolved.name,
-            price: null,
-            change: null,
-            changePercent: null,
-            symbol,
-            error: error instanceof Error ? error.message : '株価取得に失敗しました',
-          } satisfies QuoteResult;
-        }
-      })
-    );
-
-    const now = new Date();
-    const fetchedAt = new Intl.DateTimeFormat('ja-JP', {
-      dateStyle: 'short',
-      timeStyle: 'medium',
-      timeZone: 'Asia/Tokyo',
-    }).format(now);
-
-    const pasteText = results.map(toPasteLine).join('\n');
-
     return NextResponse.json({
-      fetchedAt,
+      fetchedAt: new Date().toISOString(),
       results,
-      pasteText,
-      note: 'Yahoo Finance系の非公式データに依存するため、遅延・取得失敗・仕様変更の可能性があります。重要な判断前には証券会社画面で確認してください。',
+      gptText: results
+        .map((row) => {
+          if (row.code === '-' || row.price === '-') {
+            return `${row.input} 該当銘柄または株価を取得できませんでした`;
+          }
+          return `${row.code} ${row.name}(${row.input}) ${row.price} 前日比${row.change}`;
+        })
+        .join('\n'),
     });
-  } catch (error) {
+  } catch {
     return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : '不明なエラーが発生しました',
-      },
-      { status: 500 }
+      { error: '不正なリクエストです' },
+      { status: 400 }
     );
   }
 }
