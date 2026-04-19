@@ -22,56 +22,91 @@ type QuoteResult = {
 };
 
 function normalize(text: string): string {
-  return text.trim().toLowerCase();
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[\s　・\-－_]/g, '')
+    .replace(/ホールディングス/g, 'hd')
+    .replace(/グループ/g, 'group')
+    .replace(/株式会社/g, '');
 }
 
-function findByNameOrAlias(input: string): StockMasterRow | null {
-  const normalized = normalize(input);
+function resolveStockByName(input: string): StockMasterRow | null {
+  const normalizedInput = normalize(input);
   const rows = stockMaster as StockMasterRow[];
 
-  for (const row of rows) {
-    const nameMatched = normalize(row.name).includes(normalized);
-    const aliasMatched = (row.aliases || []).some((alias) =>
-      normalize(alias).includes(normalized)
-    );
+  const exactAlias = rows.find((row) =>
+    (row.aliases || []).some((alias) => normalize(alias) === normalizedInput)
+  );
+  if (exactAlias) return exactAlias;
 
-    if (nameMatched || aliasMatched) {
-      return row;
-    }
-  }
+  const exactName = rows.find((row) => normalize(row.name) === normalizedInput);
+  if (exactName) return exactName;
+
+  const partialAlias = rows.find((row) =>
+    (row.aliases || []).some(
+      (alias) =>
+        normalize(alias).includes(normalizedInput) ||
+        normalizedInput.includes(normalize(alias))
+    )
+  );
+  if (partialAlias) return partialAlias;
+
+  const partialName = rows.find(
+    (row) =>
+      normalize(row.name).includes(normalizedInput) ||
+      normalizedInput.includes(normalize(row.name))
+  );
+  if (partialName) return partialName;
 
   return null;
 }
 
-function formatGptLine(row: QuoteResult): string {
-  if (row.error || row.price === null || row.change === null || row.changePercent === null) {
-    return `${row.input} 該当銘柄または株価を取得できませんでした`;
+function formatNumber(value: number | null, digits = 1): string {
+  if (value === null || Number.isNaN(value)) return '取得失敗';
+  return new Intl.NumberFormat('ja-JP', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(value);
+}
+
+function toPasteLine(result: QuoteResult): string {
+  if (
+    result.error ||
+    result.price === null ||
+    result.change === null ||
+    result.changePercent === null
+  ) {
+    return `${result.input} 該当銘柄または株価を取得できませんでした`;
   }
 
-  const sign = row.change >= 0 ? '+' : '';
-  return `${row.code} ${row.name}(${row.input}) ${row.price.toLocaleString('ja-JP', {
-    minimumFractionDigits: 1,
-    maximumFractionDigits: 1,
-  })}円 前日比${sign}${row.change.toLocaleString('ja-JP', {
-    minimumFractionDigits: 1,
-    maximumFractionDigits: 1,
-  })}円(${sign}${row.changePercent.toFixed(2)}%)`;
+  const changeSign = result.change >= 0 ? '+' : '';
+  const pctSign = result.changePercent >= 0 ? '+' : '';
+
+  return `${result.code} ${result.name}(${result.input}) ${formatNumber(result.price)}円 前日比${changeSign}${formatNumber(result.change)}円(${pctSign}${formatNumber(result.changePercent, 2)}%)`;
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const inputs: string[] = Array.isArray(body.inputs) ? body.inputs : [];
 
-    const cleanedInputs = inputs
-      .map((v) => String(v).trim())
-      .filter((v) => v.length > 0)
-      .slice(0, 20);
+    // page.tsx からは文字列で届く
+    const rawInputs = String(body.inputs ?? '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
 
-    const results: QuoteResult[] = [];
+    if (rawInputs.length === 0) {
+      return NextResponse.json(
+        { error: '入力が空です。1行に1銘柄ずつ入力してください。' },
+        { status: 400 }
+      );
+    }
 
-    for (const input of cleanedInputs) {
-      try {
+    const limitedInputs = rawInputs.slice(0, 20);
+
+    const results: QuoteResult[] = await Promise.all(
+      limitedInputs.map(async (input) => {
         let code = '';
         let name = '';
         let symbol = '';
@@ -81,17 +116,35 @@ export async function POST(req: NextRequest) {
           code = input;
           symbol = `${input}.T`;
 
-          const quote = await yf.quote(symbol);
+          try {
+            const quote = await yf.quote(symbol);
+            const price = quote.regularMarketPrice ?? null;
+            const prevClose = quote.regularMarketPreviousClose ?? null;
+            const change =
+              quote.regularMarketChange ??
+              (price !== null && prevClose !== null ? price - prevClose : null);
+            const changePercent =
+              quote.regularMarketChangePercent ??
+              (change !== null && prevClose ? (change / prevClose) * 100 : null);
 
-          const regularMarketPrice = Number(quote.regularMarketPrice);
-          const regularMarketPreviousClose = Number(quote.regularMarketPreviousClose);
+            name =
+              typeof quote.longName === 'string' && quote.longName.trim()
+                ? quote.longName
+                : typeof quote.shortName === 'string' && quote.shortName.trim()
+                ? quote.shortName
+                : input;
 
-          if (
-            !Number.isFinite(regularMarketPrice) ||
-            !Number.isFinite(regularMarketPreviousClose) ||
-            regularMarketPreviousClose === 0
-          ) {
-            results.push({
+            return {
+              input,
+              code,
+              name,
+              price,
+              change,
+              changePercent,
+              symbol,
+            } satisfies QuoteResult;
+          } catch (error) {
+            return {
               input,
               code,
               name: input,
@@ -99,66 +152,53 @@ export async function POST(req: NextRequest) {
               change: null,
               changePercent: null,
               symbol,
-              error: '株価データを取得できませんでした',
-            });
-            continue;
+              error: error instanceof Error ? error.message : '株価取得に失敗しました',
+            } satisfies QuoteResult;
           }
-
-          name =
-            typeof quote.longName === 'string' && quote.longName.trim()
-              ? quote.longName
-              : typeof quote.shortName === 'string' && quote.shortName.trim()
-              ? quote.shortName
-              : input;
-
-          results.push({
-            input,
-            code,
-            name,
-            price: regularMarketPrice,
-            change: regularMarketPrice - regularMarketPreviousClose,
-            changePercent:
-              ((regularMarketPrice - regularMarketPreviousClose) /
-                regularMarketPreviousClose) *
-              100,
-            symbol,
-          });
-
-          continue;
         }
 
         // 企業名・略称はJSONで解決
-        const matched = findByNameOrAlias(input);
+        const resolved = resolveStockByName(input);
 
-        if (!matched) {
-          results.push({
+        if (!resolved) {
+          return {
             input,
-            code: '',
-            name: '',
+            code: '-',
+            name: '-',
             price: null,
             change: null,
             changePercent: null,
-            symbol: '',
+            symbol: '-',
             error: '銘柄候補が見つかりませんでした',
-          });
-          continue;
+          } satisfies QuoteResult;
         }
 
-        code = matched.code;
-        name = matched.name;
-        symbol = `${matched.code}.T`;
+        code = resolved.code;
+        name = resolved.name;
+        symbol = `${resolved.code}.T`;
 
-        const quote = await yf.quote(symbol);
+        try {
+          const quote = await yf.quote(symbol);
+          const price = quote.regularMarketPrice ?? null;
+          const prevClose = quote.regularMarketPreviousClose ?? null;
+          const change =
+            quote.regularMarketChange ??
+            (price !== null && prevClose !== null ? price - prevClose : null);
+          const changePercent =
+            quote.regularMarketChangePercent ??
+            (change !== null && prevClose ? (change / prevClose) * 100 : null);
 
-        const regularMarketPrice = Number(quote.regularMarketPrice);
-        const regularMarketPreviousClose = Number(quote.regularMarketPreviousClose);
-
-        if (
-          !Number.isFinite(regularMarketPrice) ||
-          !Number.isFinite(regularMarketPreviousClose) ||
-          regularMarketPreviousClose === 0
-        ) {
-          results.push({
+          return {
+            input,
+            code,
+            name,
+            price,
+            change,
+            changePercent,
+            symbol,
+          } satisfies QuoteResult;
+        } catch (error) {
+          return {
             input,
             code,
             name,
@@ -166,51 +206,33 @@ export async function POST(req: NextRequest) {
             change: null,
             changePercent: null,
             symbol,
-            error: '株価データを取得できませんでした',
-          });
-          continue;
+            error: error instanceof Error ? error.message : '株価取得に失敗しました',
+          } satisfies QuoteResult;
         }
+      })
+    );
 
-        results.push({
-          input,
-          code,
-          name,
-          price: regularMarketPrice,
-          change: regularMarketPrice - regularMarketPreviousClose,
-          changePercent:
-            ((regularMarketPrice - regularMarketPreviousClose) /
-              regularMarketPreviousClose) *
-            100,
-          symbol,
-        });
-      } catch {
-        results.push({
-          input,
-          code: /^\d{4}$/.test(input) ? input : '',
-          name: /^\d{4}$/.test(input) ? input : '',
-          price: null,
-          change: null,
-          changePercent: null,
-          symbol: /^\d{4}$/.test(input) ? `${input}.T` : '',
-          error: '株価取得中にエラーが発生しました',
-        });
-      }
-    }
+    const now = new Date();
+    const fetchedAt = new Intl.DateTimeFormat('ja-JP', {
+      dateStyle: 'short',
+      timeStyle: 'medium',
+      timeZone: 'Asia/Tokyo',
+    }).format(now);
+
+    const pasteText = results.map(toPasteLine).join('\n');
 
     return NextResponse.json({
-      fetchedAt: new Date().toISOString(),
+      fetchedAt,
       results,
-      gptText: results.map(formatGptLine).join('\n'),
+      pasteText,
+      note: 'Yahoo Finance系の非公式データに依存するため、遅延・取得失敗・仕様変更の可能性があります。重要な判断前には証券会社画面で確認してください。',
     });
-  } catch {
+  } catch (error) {
     return NextResponse.json(
       {
-        fetchedAt: new Date().toISOString(),
-        results: [],
-        gptText: '',
-        error: '不正なリクエストです',
+        error: error instanceof Error ? error.message : '不明なエラーが発生しました',
       },
-      { status: 400 }
+      { status: 500 }
     );
   }
 }
