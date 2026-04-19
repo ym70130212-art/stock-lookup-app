@@ -90,7 +90,6 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    // page.tsx からは文字列で届く
     const rawInputs = String(body.inputs ?? '')
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -111,7 +110,6 @@ export async function POST(req: NextRequest) {
         let name = '';
         let symbol = '';
 
-        // 4桁コードなら直接取得
         if (/^\d{4}$/.test(input)) {
           code = input;
           symbol = `${input}.T`;
@@ -131,8 +129,8 @@ export async function POST(req: NextRequest) {
               typeof quote.longName === 'string' && quote.longName.trim()
                 ? quote.longName
                 : typeof quote.shortName === 'string' && quote.shortName.trim()
-                ? quote.shortName
-                : input;
+                  ? quote.shortName
+                  : input;
 
             return {
               input,
@@ -157,7 +155,6 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // 企業名・略称はJSONで解決
         const resolved = resolveStockByName(input);
 
         if (!resolved) {
