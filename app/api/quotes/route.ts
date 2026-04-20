@@ -17,7 +17,7 @@ type QuoteResult = {
   price: number | null;
   change: number | null;
   changePercent: number | null;
-  symbol: string;
+  quoteTime: number | null; // ★追加
   error?: string;
 };
 
@@ -35,47 +35,33 @@ function resolveStockByName(input: string): StockMasterRow | null {
   const normalizedInput = normalize(input);
   const rows = stockMaster as StockMasterRow[];
 
-  const exactAlias = rows.find((row) =>
-    (row.aliases || []).some((alias) => normalize(alias) === normalizedInput)
+  return (
+    rows.find((row) =>
+      (row.aliases || []).some((a) => normalize(a) === normalizedInput)
+    ) ||
+    rows.find((row) => normalize(row.name) === normalizedInput) ||
+    rows.find((row) =>
+      (row.aliases || []).some((a) =>
+        normalize(a).includes(normalizedInput)
+      )
+    ) ||
+    rows.find((row) => normalize(row.name).includes(normalizedInput)) ||
+    null
   );
-  if (exactAlias) return exactAlias;
-
-  const exactName = rows.find((row) => normalize(row.name) === normalizedInput);
-  if (exactName) return exactName;
-
-  const partialAlias = rows.find((row) =>
-    (row.aliases || []).some(
-      (alias) =>
-        normalize(alias).includes(normalizedInput) ||
-        normalizedInput.includes(normalize(alias))
-    )
-  );
-  if (partialAlias) return partialAlias;
-
-  const partialName = rows.find(
-    (row) =>
-      normalize(row.name).includes(normalizedInput) ||
-      normalizedInput.includes(normalize(row.name))
-  );
-  if (partialName) return partialName;
-
-  return null;
 }
 
 function parseInputs(body: any): string[] {
   const src = body?.inputs;
-
   if (Array.isArray(src)) {
     return src.map((v) => String(v).trim()).filter(Boolean);
   }
-
   return String(src ?? '')
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map((l) => l.trim())
     .filter(Boolean);
 }
 
-// 日本時間で固定
+// 日本時間
 function formatTimestamp(date: Date): string {
   const parts = new Intl.DateTimeFormat('ja-JP', {
     timeZone: 'Asia/Tokyo',
@@ -88,51 +74,66 @@ function formatTimestamp(date: Date): string {
   }).formatToParts(date);
 
   const map = Object.fromEntries(
-    parts
-      .filter((p) => p.type !== 'literal')
-      .map((p) => [p.type, p.value])
-  ) as Record<string, string>;
+    parts.filter(p => p.type !== 'literal').map(p => [p.type, p.value])
+  ) as any;
 
   return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}`;
 }
 
-function toPasteLine(result: QuoteResult): string {
+// ★追加：各銘柄の時刻
+function formatQuoteTime(ts: number | null): string {
+  if (!ts) return "--:--:--";
+
+  const date = new Date(ts * 1000);
+
+  return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date);
+}
+
+// ★ここが最重要
+function toPasteLine(r: QuoteResult): string {
   if (
-    result.error ||
-    result.price === null ||
-    result.change === null ||
-    result.changePercent === null
+    r.error ||
+    r.price === null ||
+    r.change === null ||
+    r.changePercent === null
   ) {
-    return `${result.code || result.input} ${result.name || '-'} 取得失敗`;
+    return `${r.code || r.input} ${r.name || "-"} 取得失敗`;
   }
 
-  const price = Math.round(result.price);
-  const change = Math.round(result.change);
-  const pct = result.changePercent;
+  const price = Math.round(r.price);
+  const change = Math.round(r.change);
+  const pct = r.changePercent;
 
-  const changeStr = `${change >= 0 ? '+' : ''}${change}`;
-  const pctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+  const changeStr = `${change >= 0 ? "+" : ""}${change}`;
+  const pctStr = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
 
-  return `${result.code} ${result.name} ${price} ${changeStr} (${pctStr})`;
+  const timeStr = formatQuoteTime(r.quoteTime);
+
+  return `${r.code} ${r.name} ${price} ${changeStr} (${pctStr}) [${timeStr}]`;
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const rawInputs = parseInputs(body);
+    const inputs = parseInputs(body);
 
-    if (rawInputs.length === 0) {
+    if (inputs.length === 0) {
       return NextResponse.json(
-        { error: '入力が空です。1行に1銘柄ずつ入力してください。' },
+        { error: '入力が空です' },
         { status: 400 }
       );
     }
 
-    const limitedInputs = rawInputs.slice(0, 20);
-    const masterRows = stockMaster as StockMasterRow[];
+    const master = stockMaster as StockMasterRow[];
 
     const results: QuoteResult[] = await Promise.all(
-      limitedInputs.map(async (input) => {
+      inputs.slice(0, 20).map(async (input) => {
         let code = '';
         let name = '';
         let symbol = '';
@@ -140,103 +141,59 @@ export async function POST(req: NextRequest) {
         if (/^\d{4}$/.test(input)) {
           code = input;
           symbol = `${input}.T`;
-
-          try {
-            const quote = await yf.quote(symbol);
-
-            const price = quote.regularMarketPrice ?? null;
-            const prevClose = quote.regularMarketPreviousClose ?? null;
-
-            const change =
-              quote.regularMarketChange ??
-              (price !== null && prevClose !== null ? price - prevClose : null);
-
-            const changePercent =
-              quote.regularMarketChangePercent ??
-              (change !== null && prevClose ? (change / prevClose) * 100 : null);
-
-            const matched = masterRows.find((row) => row.code === input);
-
-            name =
-              matched?.name ||
-              quote.longName ||
-              quote.shortName ||
-              input;
-
+        } else {
+          const resolved = resolveStockByName(input);
+          if (!resolved) {
             return {
               input,
-              code,
-              name,
-              price,
-              change,
-              changePercent,
-              symbol,
-            };
-          } catch {
-            return {
-              input,
-              code,
-              name: input,
+              code: '-',
+              name: '-',
               price: null,
               change: null,
               changePercent: null,
-              symbol,
-              error: '取得失敗',
+              quoteTime: null,
+              error: '銘柄不明',
             };
           }
+          code = resolved.code;
+          name = resolved.name;
+          symbol = `${code}.T`;
         }
-
-        const resolved = resolveStockByName(input);
-
-        if (!resolved) {
-          return {
-            input,
-            code: '-',
-            name: '-',
-            price: null,
-            change: null,
-            changePercent: null,
-            symbol: '-',
-            error: '銘柄不明',
-          };
-        }
-
-        code = resolved.code;
-        name = resolved.name;
-        symbol = `${code}.T`;
 
         try {
-          const quote = await yf.quote(symbol);
+          const q = await yf.quote(symbol);
 
-          const price = quote.regularMarketPrice ?? null;
-          const prevClose = quote.regularMarketPreviousClose ?? null;
+          const price = q.regularMarketPrice ?? null;
+          const prev = q.regularMarketPreviousClose ?? null;
 
           const change =
-            quote.regularMarketChange ??
-            (price !== null && prevClose !== null ? price - prevClose : null);
+            q.regularMarketChange ??
+            (price !== null && prev !== null ? price - prev : null);
 
-          const changePercent =
-            quote.regularMarketChangePercent ??
-            (change !== null && prevClose ? (change / prevClose) * 100 : null);
+          const pct =
+            q.regularMarketChangePercent ??
+            (change !== null && prev ? (change / prev) * 100 : null);
+
+          const matched = master.find((m) => m.code === code);
 
           return {
             input,
             code,
-            name,
+            name: name || matched?.name || input,
             price,
             change,
-            changePercent,
-            symbol,
+            changePercent: pct,
+            quoteTime: q.regularMarketTime ?? null, // ★ここ
           };
         } catch {
           return {
             input,
             code,
-            name,
+            name: input,
             price: null,
             change: null,
             changePercent: null,
-            symbol,
+            quoteTime: null,
             error: '取得失敗',
           };
         }
@@ -244,20 +201,18 @@ export async function POST(req: NextRequest) {
     );
 
     const now = new Date();
-    const fetchedAt = formatTimestamp(now);
 
     const pasteText =
-      `取得時刻: ${fetchedAt}\n\n` +
+      `取得時刻: ${formatTimestamp(now)}\n\n` +
       results.map(toPasteLine).join('\n');
 
     return NextResponse.json({
-      fetchedAt,
-      results,
       pasteText,
+      results,
     });
   } catch {
     return NextResponse.json(
-      { error: '不明なエラーが発生しました' },
+      { error: 'エラー' },
       { status: 500 }
     );
   }
