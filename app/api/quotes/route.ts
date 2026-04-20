@@ -17,7 +17,7 @@ type QuoteResult = {
   price: number | null;
   change: number | null;
   changePercent: number | null;
-  quoteTime: number | null;
+  quoteTime: number | Date | null;
   error?: string;
 };
 
@@ -96,17 +96,28 @@ function formatTimestamp(date: Date): string {
 }
 
 function formatQuoteTime(value: number | Date | null | undefined): string {
-  if (!value) return '--:--:--';
+  if (!value) return '----.--.-- --:--:--';
 
   const date = value instanceof Date ? value : new Date(value * 1000);
 
-  return new Intl.DateTimeFormat('ja-JP', {
+  const parts = new Intl.DateTimeFormat('ja-JP', {
     timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
     hour12: false,
-  }).format(date);
+  }).formatToParts(date);
+
+  const map = Object.fromEntries(
+    parts
+      .filter((p) => p.type !== 'literal')
+      .map((p) => [p.type, p.value])
+  ) as Record<string, string>;
+
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
 }
 
 function toPasteLine(result: QuoteResult): string {
@@ -189,11 +200,8 @@ export async function POST(req: NextRequest) {
               price,
               change,
               changePercent,
-              quoteTime:
-                quote.regularMarketTime instanceof Date
-                  ? quote.regularMarketTime
-                  : quote.regularMarketTime ?? null,
-            } as unknown as QuoteResult;
+              quoteTime: quote.regularMarketTime ?? null,
+            };
           } catch {
             return {
               input,
@@ -248,11 +256,8 @@ export async function POST(req: NextRequest) {
             price,
             change,
             changePercent,
-            quoteTime:
-              quote.regularMarketTime instanceof Date
-                ? quote.regularMarketTime
-                : quote.regularMarketTime ?? null,
-          } as unknown as QuoteResult;
+            quoteTime: quote.regularMarketTime ?? null,
+          };
         } catch {
           return {
             input,
