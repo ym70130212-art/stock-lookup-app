@@ -15,25 +15,19 @@ export default function Page() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // 前回入力の復元
   useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         setInput(saved);
       }
-    } catch {
-      // 何もしない
-    }
+    } catch {}
   }, []);
 
-  // 入力の自動保存
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, input);
-    } catch {
-      // 何もしない
-    }
+    } catch {}
   }, [input]);
 
   const handleFetch = async () => {
@@ -75,7 +69,11 @@ export default function Page() {
   };
 
   const handleClear = () => {
+    alert('clear clicked');
+
     const ok = window.confirm('入力内容と結果をすべて削除しますか？');
+    alert(`confirm result: ${ok}`);
+
     if (!ok) return;
 
     setInput('');
@@ -84,9 +82,7 @@ export default function Page() {
 
     try {
       localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // 何もしない
-    }
+    } catch {}
   };
 
   const handleCopy = async () => {
@@ -101,7 +97,7 @@ export default function Page() {
 
   return (
     <main style={{ maxWidth: 900, margin: '0 auto', padding: 16 }}>
-      <h1 style={{ fontSize: 28, marginBottom: 16 }}>株価一覧アプリ</h1>
+      <h1 style={{ fontSize: 28, marginBottom: 16 }}>株価一覧アプリ TEST999</h1>
 
       <p style={{ marginBottom: 8 }}>
         1行に1銘柄ずつ、銘柄コードを入力してください
