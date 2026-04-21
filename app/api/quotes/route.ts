@@ -17,6 +17,8 @@ type QuoteResult = {
   price: number | null;
   change: number | null;
   changePercent: number | null;
+  openDiff: number | null;
+  openDiffPercent: number | null;
   totalVolume: number | null;
   quoteTime: number | Date | null;
   error?: string;
@@ -88,9 +90,7 @@ function formatTimestamp(date: Date): string {
   }).formatToParts(date);
 
   const map = Object.fromEntries(
-    parts
-      .filter((p) => p.type !== 'literal')
-      .map((p) => [p.type, p.value])
+    parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
   ) as Record<string, string>;
 
   return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}`;
@@ -113,9 +113,7 @@ function formatQuoteTime(value: number | Date | null | undefined): string {
   }).formatToParts(date);
 
   const map = Object.fromEntries(
-    parts
-      .filter((p) => p.type !== 'literal')
-      .map((p) => [p.type, p.value])
+    parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
   ) as Record<string, string>;
 
   return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
@@ -124,6 +122,28 @@ function formatQuoteTime(value: number | Date | null | undefined): string {
 function formatVolume(volume: number | null): string {
   if (volume === null || Number.isNaN(volume)) return '-';
   return volume.toLocaleString('ja-JP');
+}
+
+function formatSignedNumber(value: number): string {
+  const rounded =
+    Math.abs(value) >= 1
+      ? Math.round(value)
+      : Number(value.toFixed(1));
+
+  return `${rounded >= 0 ? '+' : ''}${rounded}`;
+}
+
+function formatSignedPercent(value: number): string {
+  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+}
+
+function formatPrice(value: number): string {
+  const rounded =
+    Math.abs(value - Math.round(value)) < 0.000001
+      ? Math.round(value)
+      : Number(value.toFixed(1));
+
+  return String(rounded);
 }
 
 function toPasteLine(result: QuoteResult): string {
@@ -136,24 +156,19 @@ function toPasteLine(result: QuoteResult): string {
     return `${result.code || result.input} ${result.name || '-'} 取得失敗`;
   }
 
-  const price =
-    Math.abs(result.price - Math.round(result.price)) < 0.000001
-      ? String(Math.round(result.price))
-      : String(Number(result.price.toFixed(1)));
+  const priceStr = formatPrice(result.price);
+  const changeStr = formatSignedNumber(result.change);
+  const changePctStr = formatSignedPercent(result.changePercent);
 
-  const change =
-    Math.abs(result.change) >= 1
-      ? Math.round(result.change)
-      : Number(result.change.toFixed(1));
+  const openDiffStr =
+    result.openDiff !== null ? formatSignedNumber(result.openDiff) : '-';
+  const openDiffPctStr =
+    result.openDiffPercent !== null ? formatSignedPercent(result.openDiffPercent) : '-';
 
-  const pct = result.changePercent;
-
-  const changeStr = `${change >= 0 ? '+' : ''}${change}`;
-  const pctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
   const volumeStr = formatVolume(result.totalVolume);
   const timeStr = formatQuoteTime(result.quoteTime);
 
-  return `${result.code} ${result.name} ${price} ${changeStr} (${pctStr}) 出来高 ${volumeStr} [${timeStr}]`;
+  return `${result.code} ${result.name} ${priceStr} ${changeStr} (${changePctStr}) ${openDiffStr} (${openDiffPctStr}) 出来高 ${volumeStr} [${timeStr}]`;
 }
 
 function getTodayRangeInJst() {
@@ -167,9 +182,7 @@ function getTodayRangeInJst() {
   }).formatToParts(now);
 
   const map = Object.fromEntries(
-    parts
-      .filter((p) => p.type !== 'literal')
-      .map((p) => [p.type, p.value])
+    parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
   ) as Record<string, string>;
 
   const ymd = `${map.year}-${map.month}-${map.day}`;
@@ -215,6 +228,8 @@ export async function POST(req: NextRequest) {
               price: null,
               change: null,
               changePercent: null,
+              openDiff: null,
+              openDiffPercent: null,
               totalVolume: null,
               quoteTime: null,
               error: '銘柄不明',
@@ -254,12 +269,25 @@ export async function POST(req: NextRequest) {
             chart.meta?.chartPreviousClose ??
             null;
 
+          const openPrice =
+            validQuotes.find(
+              (q) => q.open !== null && q.open !== undefined
+            )?.open ?? null;
+
           const change =
             price !== null && prevClose !== null ? price - prevClose : null;
 
           const changePercent =
             change !== null && prevClose
               ? (change / prevClose) * 100
+              : null;
+
+          const openDiff =
+            price !== null && openPrice !== null ? price - openPrice : null;
+
+          const openDiffPercent =
+            openDiff !== null && openPrice
+              ? (openDiff / openPrice) * 100
               : null;
 
           const totalVolume = validQuotes.reduce((sum, q) => {
@@ -284,6 +312,8 @@ export async function POST(req: NextRequest) {
             price,
             change,
             changePercent,
+            openDiff,
+            openDiffPercent,
             totalVolume,
             quoteTime: last.date ?? null,
           };
@@ -296,6 +326,8 @@ export async function POST(req: NextRequest) {
             price: null,
             change: null,
             changePercent: null,
+            openDiff: null,
+            openDiffPercent: null,
             totalVolume: null,
             quoteTime: null,
             error: '取得失敗',
