@@ -168,7 +168,7 @@ function toPasteLine(result: QuoteResult): string {
   const volumeStr = formatVolume(result.totalVolume);
   const timeStr = formatQuoteTime(result.quoteTime);
 
-  return `${result.code} ${result.name} ${priceStr} ${changeStr} (${changePctStr}) ${openDiffStr} (${openDiffPctStr}) 出来高 ${volumeStr} [${timeStr}]`;
+  return `${result.code} ${result.name} ${priceStr} ${changeStr} (${changePctStr}) / 始値比 ${openDiffStr} (${openDiffPctStr}) 出来高 ${volumeStr} [${timeStr}]`;
 }
 
 function getTodayRangeInJst() {
