@@ -1,135 +1,87 @@
-"use client";
+'use client';
 
-import { useEffect, useMemo, useState } from "react";
-
-type QuoteResult = {
-  input: string;
-  code: string;
-  name: string;
-  price: number | null;
-  change: number | null;
-  changePercent: number | null;
-};
-
-type ApiResponse = {
-  results: QuoteResult[];
-  fetchedAt: string;
-  pasteText: string;
-};
-
-const STORAGE_KEY = "stock-app-last-input";
+import { useEffect, useState } from 'react';
 
 export default function Page() {
-  const [text, setText] = useState("");
-  const [pasteText, setPasteText] = useState("");
+  const [input, setInput] = useState('');
+  const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
 
-  // 前回入力復元
+  // ★ 初回ロード時に復元
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) setText(saved);
+    const saved = localStorage.getItem('stock-input');
+    if (saved) {
+      setInput(saved);
+    }
   }, []);
 
-  // 自動保存
+  // ★ 入力変更で保存
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, text);
-  }, [text]);
+    localStorage.setItem('stock-input', input);
+  }, [input]);
 
-  const inputs = useMemo(() => {
-    return text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-  }, [text]);
-
+  // ★ 取得処理
   const handleFetch = async () => {
-    if (inputs.length === 0) {
-      setError("入力してください");
-      return;
-    }
+    if (!input.trim()) return;
 
     setLoading(true);
-    setError("");
 
     try {
-      const res = await fetch("/api/quotes", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ inputs }),
+      const res = await fetch('/api/quotes', {
+        method: 'POST',
+        body: JSON.stringify({
+          inputs: input.split('\n'),
+        }),
       });
 
-      const data: ApiResponse = await res.json();
-
-      if (!res.ok) {
-        throw new Error("取得失敗");
-      }
-
-      // 👉 ここが今回の核心
-      setPasteText(data.pasteText);
-
-    } catch (err) {
-      setError("取得エラー");
-      setPasteText("");
+      const data = await res.json();
+      setResult(data.pasteText || '');
+    } catch (e) {
+      setResult('取得エラー');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleCopy = async () => {
-    if (!pasteText) return;
-
-    try {
-      await navigator.clipboard.writeText(pasteText);
-    } catch {
-      setError("コピー失敗");
-    }
-  };
-
+  // ★ クリア（確認付き）
   const handleClear = () => {
-    setText("");
-    setPasteText("");
-    localStorage.removeItem(STORAGE_KEY);
+    const ok = window.confirm('入力内容をすべて削除しますか？');
+
+    if (!ok) return;
+
+    setInput('');
+    setResult('');
+    localStorage.removeItem('stock-input');
   };
 
   return (
-    <main style={{ maxWidth: 900, margin: "0 auto", padding: 20 }}>
-      <h1>株価一覧アプリ</h1>
+    <main style={{ padding: 16 }}>
+      <h2>株価取得ツール</h2>
 
       <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        rows={8}
-        style={{ width: "100%", marginBottom: 10 }}
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        rows={10}
+        style={{ width: '100%', marginBottom: 12 }}
+        placeholder="銘柄コードを改行で入力（例：6741）"
       />
 
-      <div style={{ display: "flex", gap: 10 }}>
-        <button onClick={handleFetch}>
-          {loading ? "取得中..." : "取得"}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <button onClick={handleFetch} disabled={loading}>
+          {loading ? '取得中...' : '取得'}
         </button>
 
-        <button onClick={handleCopy}>コピー</button>
-
-        <button onClick={handleClear}>クリア</button>
+        <button onClick={handleClear}>
+          クリア
+        </button>
       </div>
 
-      {error && <p style={{ color: "red" }}>{error}</p>}
-
-      {/* 👉 ChatGPT用出力 */}
-      {pasteText && (
-        <pre
-          style={{
-            marginTop: 20,
-            background: "#f5f5f5",
-            padding: 10,
-            whiteSpace: "pre-wrap",
-          }}
-        >
-          {pasteText}
-        </pre>
-      )}
+      <textarea
+        value={result}
+        readOnly
+        rows={15}
+        style={{ width: '100%' }}
+      />
     </main>
   );
 }
