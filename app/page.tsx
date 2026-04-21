@@ -1,153 +1,309 @@
-'use client';
+import { NextRequest, NextResponse } from 'next/server';
+import yahooFinance from 'yahoo-finance2';
+import stockMaster from '../../../data/jp-stocks.json';
 
-import { useEffect, useState } from 'react';
+const yf = new yahooFinance();
 
-type ApiResponse = {
-  pasteText?: string;
+type StockMasterRow = {
+  code: string;
+  name: string;
+  aliases?: string[];
+};
+
+type QuoteResult = {
+  input: string;
+  code: string;
+  name: string;
+  price: number | null;
+  change: number | null;
+  changePercent: number | null;
+  quoteTime: number | Date | null;
   error?: string;
 };
 
-const STORAGE_KEY = 'stock-input';
+function normalize(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[\s　・\-－_]/g, '')
+    .replace(/ホールディングス/g, 'hd')
+    .replace(/グループ/g, 'group')
+    .replace(/株式会社/g, '');
+}
 
-export default function Page() {
-  const [input, setInput] = useState('');
-  const [result, setResult] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+function resolveStockByName(input: string): StockMasterRow | null {
+  const normalizedInput = normalize(input);
+  const rows = stockMaster as StockMasterRow[];
 
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        setInput(saved);
-      }
-    } catch {}
-  }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, input);
-    } catch {}
-  }, [input]);
-
-  const handleFetch = async () => {
-    if (!input.trim()) {
-      setError('入力してください');
-      return;
-    }
-
-    setLoading(true);
-    setError('');
-
-    try {
-      const res = await fetch('/api/quotes', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          inputs: input
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter(Boolean),
-        }),
-      });
-
-      const data: ApiResponse = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data?.error || '取得失敗');
-      }
-
-      setResult(data.pasteText || '');
-    } catch (e) {
-      setResult('');
-      setError(e instanceof Error ? e.message : '取得エラー');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleClear = () => {
-    alert('clear clicked');
-
-    const ok = window.confirm('入力内容と結果をすべて削除しますか？');
-    alert(`confirm result: ${ok}`);
-
-    if (!ok) return;
-
-    setInput('');
-    setResult('');
-    setError('');
-
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch {}
-  };
-
-  const handleCopy = async () => {
-    if (!result) return;
-
-    try {
-      await navigator.clipboard.writeText(result);
-    } catch {
-      setError('コピーに失敗しました');
-    }
-  };
-
-  return (
-    <main style={{ maxWidth: 900, margin: '0 auto', padding: 16 }}>
-      <h1 style={{ fontSize: 28, marginBottom: 16 }}>株価一覧アプリ TEST999</h1>
-
-      <p style={{ marginBottom: 8 }}>
-        1行に1銘柄ずつ、銘柄コードを入力してください
-      </p>
-
-      <textarea
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        rows={10}
-        style={{
-          width: '100%',
-          boxSizing: 'border-box',
-          marginBottom: 12,
-          padding: 12,
-          fontSize: 16,
-        }}
-        placeholder={`6741\n2484\n4901`}
-      />
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-        <button type="button" onClick={handleFetch} disabled={loading}>
-          {loading ? '取得中...' : '取得'}
-        </button>
-
-        <button type="button" onClick={handleCopy} disabled={!result}>
-          コピー
-        </button>
-
-        <button type="button" onClick={handleClear}>
-          クリア
-        </button>
-      </div>
-
-      {error && (
-        <div style={{ color: 'crimson', marginBottom: 12 }}>
-          {error}
-        </div>
-      )}
-
-      <textarea
-        value={result}
-        readOnly
-        rows={16}
-        style={{
-          width: '100%',
-          boxSizing: 'border-box',
-          padding: 12,
-          fontSize: 16,
-        }}
-      />
-    </main>
+  const exactAlias = rows.find((row) =>
+    (row.aliases || []).some((alias) => normalize(alias) === normalizedInput)
   );
+  if (exactAlias) return exactAlias;
+
+  const exactName = rows.find((row) => normalize(row.name) === normalizedInput);
+  if (exactName) return exactName;
+
+  const partialAlias = rows.find((row) =>
+    (row.aliases || []).some(
+      (alias) =>
+        normalize(alias).includes(normalizedInput) ||
+        normalizedInput.includes(normalize(alias))
+    )
+  );
+  if (partialAlias) return partialAlias;
+
+  const partialName = rows.find(
+    (row) =>
+      normalize(row.name).includes(normalizedInput) ||
+      normalizedInput.includes(normalize(row.name))
+  );
+  if (partialName) return partialName;
+
+  return null;
+}
+
+function parseInputs(body: any): string[] {
+  const src = body?.inputs;
+
+  if (Array.isArray(src)) {
+    return src.map((v) => String(v).trim()).filter(Boolean);
+  }
+
+  return String(src ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function formatTimestamp(date: Date): string {
+  const parts = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+
+  const map = Object.fromEntries(
+    parts
+      .filter((p) => p.type !== 'literal')
+      .map((p) => [p.type, p.value])
+  ) as Record<string, string>;
+
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}`;
+}
+
+function formatQuoteTime(value: number | Date | null | undefined): string {
+  if (!value) return '----.--.-- --:--:--';
+
+  const date = value instanceof Date ? value : new Date(value * 1000);
+
+  const parts = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+
+  const map = Object.fromEntries(
+    parts
+      .filter((p) => p.type !== 'literal')
+      .map((p) => [p.type, p.value])
+  ) as Record<string, string>;
+
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
+}
+
+function toPasteLine(result: QuoteResult): string {
+  if (
+    result.error ||
+    result.price === null ||
+    result.change === null ||
+    result.changePercent === null
+  ) {
+    return `${result.code || result.input} ${result.name || '-'} 取得失敗`;
+  }
+
+  const price = Math.round(result.price);
+  const change =
+    Math.abs(result.change) >= 1
+      ? Math.round(result.change)
+      : Number(result.change.toFixed(1));
+  const pct = result.changePercent;
+
+  const changeStr = `${change >= 0 ? '+' : ''}${change}`;
+  const pctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+  const timeStr = formatQuoteTime(result.quoteTime);
+
+  return `${result.code} ${result.name} ${price} ${changeStr} (${pctStr}) [${timeStr}]`;
+}
+
+function getTodayRangeInJst() {
+  const now = new Date();
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+
+  const map = Object.fromEntries(
+    parts
+      .filter((p) => p.type !== 'literal')
+      .map((p) => [p.type, p.value])
+  ) as Record<string, string>;
+
+  const ymd = `${map.year}-${map.month}-${map.day}`;
+
+  // JST の当日 00:00:00 ～ 23:59:59
+  const period1 = `${ymd}T00:00:00+09:00`;
+  const period2 = `${ymd}T23:59:59+09:00`;
+
+  return { period1, period2 };
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const rawInputs = parseInputs(body);
+
+    if (rawInputs.length === 0) {
+      return NextResponse.json(
+        { error: '入力が空です。1行に1銘柄ずつ入力してください。' },
+        { status: 400 }
+      );
+    }
+
+    const limitedInputs = rawInputs.slice(0, 20);
+    const masterRows = stockMaster as StockMasterRow[];
+    const { period1, period2 } = getTodayRangeInJst();
+
+    const results: QuoteResult[] = await Promise.all(
+      limitedInputs.map(async (input) => {
+        let code = '';
+        let name = '';
+        let symbol = '';
+
+        if (/^\d{4}$/.test(input)) {
+          code = input;
+          symbol = `${input}.T`;
+        } else {
+          const resolved = resolveStockByName(input);
+
+          if (!resolved) {
+            return {
+              input,
+              code: '-',
+              name: '-',
+              price: null,
+              change: null,
+              changePercent: null,
+              quoteTime: null,
+              error: '銘柄不明',
+            };
+          }
+
+          code = resolved.code;
+          name = resolved.name;
+          symbol = `${code}.T`;
+        }
+
+        try {
+          const chart = await yf.chart(symbol, {
+            interval: '1m',
+            period1,
+            period2,
+          });
+
+          const quoteSeries = chart.quotes ?? [];
+          const validQuotes = quoteSeries.filter(
+            (q) =>
+              q.close !== null &&
+              q.close !== undefined &&
+              q.date !== null &&
+              q.date !== undefined
+          );
+
+          if (validQuotes.length === 0) {
+            throw new Error('当日1分足データなし');
+          }
+
+          const last = validQuotes[validQuotes.length - 1];
+          const price = last.close ?? null;
+
+          const prevClose =
+            chart.meta?.previousClose ??
+            chart.meta?.chartPreviousClose ??
+            null;
+
+          const change =
+            price !== null && prevClose !== null ? price - prevClose : null;
+
+          const changePercent =
+            change !== null && prevClose
+              ? (change / prevClose) * 100
+              : null;
+
+          const matched = masterRows.find((row) => row.code === code);
+
+          const displayName =
+            name ||
+            matched?.name ||
+            (typeof chart.meta?.longName === 'string' && chart.meta.longName.trim()
+              ? chart.meta.longName
+              : typeof chart.meta?.shortName === 'string' && chart.meta.shortName.trim()
+                ? chart.meta.shortName
+                : input);
+
+          return {
+            input,
+            code,
+            name: displayName,
+            price,
+            change,
+            changePercent,
+            quoteTime: last.date ?? null,
+          };
+        } catch {
+          return {
+            input,
+            code: code || input,
+            name: name || input,
+            price: null,
+            change: null,
+            changePercent: null,
+            quoteTime: null,
+            error: '取得失敗',
+          };
+        }
+      })
+    );
+
+    const now = new Date();
+    const fetchedAt = formatTimestamp(now);
+
+    const pasteText =
+      `取得時刻: ${fetchedAt}\n\n` +
+      results.map(toPasteLine).join('\n');
+
+    return NextResponse.json({
+      fetchedAt,
+      results,
+      pasteText,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error: error instanceof Error ? error.message : '不明なエラーが発生しました',
+      },
+      { status: 500 }
+    );
+  }
 }
