@@ -17,6 +17,7 @@ type QuoteResult = {
   price: number | null;
   change: number | null;
   changePercent: number | null;
+  totalVolume: number | null;
   quoteTime: number | Date | null;
   error?: string;
 };
@@ -120,6 +121,11 @@ function formatQuoteTime(value: number | Date | null | undefined): string {
   return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
 }
 
+function formatVolume(volume: number | null): string {
+  if (volume === null || Number.isNaN(volume)) return '-';
+  return volume.toLocaleString('ja-JP');
+}
+
 function toPasteLine(result: QuoteResult): string {
   if (
     result.error ||
@@ -130,18 +136,24 @@ function toPasteLine(result: QuoteResult): string {
     return `${result.code || result.input} ${result.name || '-'} 取得失敗`;
   }
 
-  const price = Math.round(result.price);
+  const price =
+    Math.abs(result.price - Math.round(result.price)) < 0.000001
+      ? String(Math.round(result.price))
+      : String(Number(result.price.toFixed(1)));
+
   const change =
     Math.abs(result.change) >= 1
       ? Math.round(result.change)
       : Number(result.change.toFixed(1));
+
   const pct = result.changePercent;
 
   const changeStr = `${change >= 0 ? '+' : ''}${change}`;
   const pctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+  const volumeStr = formatVolume(result.totalVolume);
   const timeStr = formatQuoteTime(result.quoteTime);
 
-  return `${result.code} ${result.name} ${price} ${changeStr} (${pctStr}) [${timeStr}]`;
+  return `${result.code} ${result.name} ${price} ${changeStr} (${pctStr}) 出来高 ${volumeStr} [${timeStr}]`;
 }
 
 function getTodayRangeInJst() {
@@ -203,6 +215,7 @@ export async function POST(req: NextRequest) {
               price: null,
               change: null,
               changePercent: null,
+              totalVolume: null,
               quoteTime: null,
               error: '銘柄不明',
             };
@@ -249,6 +262,10 @@ export async function POST(req: NextRequest) {
               ? (change / prevClose) * 100
               : null;
 
+          const totalVolume = validQuotes.reduce((sum, q) => {
+            return sum + (q.volume ?? 0);
+          }, 0);
+
           const matched = masterRows.find((row) => row.code === code);
 
           const displayName =
@@ -267,6 +284,7 @@ export async function POST(req: NextRequest) {
             price,
             change,
             changePercent,
+            totalVolume,
             quoteTime: last.date ?? null,
           };
         } catch (e) {
@@ -278,6 +296,7 @@ export async function POST(req: NextRequest) {
             price: null,
             change: null,
             changePercent: null,
+            totalVolume: null,
             quoteTime: null,
             error: '取得失敗',
           };
