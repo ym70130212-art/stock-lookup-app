@@ -202,13 +202,31 @@ function getHistoricalRange() {
 async function fetchConfirmedQuote(symbol: string) {
   const { period1, period2 } = getHistoricalRange();
 
+  console.log('[fallback:start]', {
+    symbol,
+    period1: period1.toISOString(),
+    period2: period2.toISOString(),
+  });
+
   const rows = await yf.historical(symbol, {
     period1,
     period2,
     interval: '1d',
   });
 
+  console.log('[fallback:rawRows]', {
+    symbol,
+    rowCount: Array.isArray(rows) ? rows.length : 'not-array',
+    firstRow: Array.isArray(rows) && rows.length > 0 ? rows[0] : null,
+    lastRow: Array.isArray(rows) && rows.length > 0 ? rows[rows.length - 1] : null,
+  });
+
   if (!rows || rows.length < 2) {
+    console.error('[fallback:error] rows不足', {
+      symbol,
+      rowCount: rows?.length ?? null,
+      rows,
+    });
     throw new Error('確定データ不足');
   }
 
@@ -221,7 +239,20 @@ async function fetchConfirmedQuote(symbol: string) {
       row.close !== undefined
   );
 
+  console.log('[fallback:validRows]', {
+    symbol,
+    validCount: validRows.length,
+    validFirst: validRows.length > 0 ? validRows[0] : null,
+    validLast: validRows.length > 0 ? validRows[validRows.length - 1] : null,
+  });
+
   if (validRows.length < 2) {
+    console.error('[fallback:error] validRows不足', {
+      symbol,
+      validCount: validRows.length,
+      rows,
+      validRows,
+    });
     throw new Error('確定データ有効件数不足');
   }
 
@@ -233,16 +264,39 @@ async function fetchConfirmedQuote(symbol: string) {
   const lastOpen = Number(last.open);
   const lastVolume = Number(last.volume ?? 0);
 
+  console.log('[fallback:parsed]', {
+    symbol,
+    last,
+    prev,
+    lastClose,
+    prevClose,
+    lastOpen,
+    lastVolume,
+    isLastCloseFinite: Number.isFinite(lastClose),
+    isPrevCloseFinite: Number.isFinite(prevClose),
+    isLastOpenFinite: Number.isFinite(lastOpen),
+    isLastVolumeFinite: Number.isFinite(lastVolume),
+  });
+
   if (
     !Number.isFinite(lastClose) ||
     !Number.isFinite(prevClose) ||
     !Number.isFinite(lastOpen) ||
     !Number.isFinite(lastVolume)
   ) {
+    console.error('[fallback:error] 数値不正', {
+      symbol,
+      last,
+      prev,
+      lastClose,
+      prevClose,
+      lastOpen,
+      lastVolume,
+    });
     throw new Error('確定データ数値不正');
   }
 
-  return {
+  const result = {
     price: lastClose,
     change: lastClose - prevClose,
     changePercent: prevClose !== 0 ? ((lastClose - prevClose) / prevClose) * 100 : null,
@@ -251,6 +305,13 @@ async function fetchConfirmedQuote(symbol: string) {
     totalVolume: lastVolume,
     quoteTime: null,
   };
+
+  console.log('[fallback:success]', {
+    symbol,
+    result,
+  });
+
+  return result;
 }
 
 export async function POST(req: NextRequest) {
@@ -269,6 +330,13 @@ export async function POST(req: NextRequest) {
     const masterRows = stockMaster as StockMasterRow[];
     const { period1, period2 } = getTodayRangeInJst();
 
+    console.log('[request:start]', {
+      rawInputs,
+      limitedInputs,
+      period1,
+      period2,
+    });
+
     const results: QuoteResult[] = await Promise.all(
       limitedInputs.map(async (input) => {
         let code = '';
@@ -282,6 +350,7 @@ export async function POST(req: NextRequest) {
           const resolved = resolveStockByName(input);
 
           if (!resolved) {
+            console.error('[intraday:error] 銘柄不明', { input });
             return {
               input,
               code: '-',
@@ -319,6 +388,13 @@ export async function POST(req: NextRequest) {
           );
 
           if (validQuotes.length === 0) {
+            console.error('[intraday:error] 当日1分足データなし', {
+              input,
+              code,
+              name,
+              symbol,
+              quoteSeriesLength: quoteSeries.length,
+            });
             throw new Error('当日1分足データなし');
           }
 
@@ -327,6 +403,13 @@ export async function POST(req: NextRequest) {
           );
 
           if (!firstWithOpen) {
+            console.error('[intraday:error] 始値データなし', {
+              input,
+              code,
+              name,
+              symbol,
+              validQuotesLength: validQuotes.length,
+            });
             throw new Error('始値データなし');
           }
 
@@ -345,6 +428,17 @@ export async function POST(req: NextRequest) {
             !Number.isFinite(firstOpen) ||
             !Number.isFinite(prevCloseRaw)
           ) {
+            console.error('[intraday:error] 数値不正', {
+              input,
+              code,
+              name,
+              symbol,
+              last,
+              firstWithOpen,
+              prevCloseRaw,
+              lastClose,
+              firstOpen,
+            });
             throw new Error('数値不正');
           }
 
@@ -386,7 +480,13 @@ export async function POST(req: NextRequest) {
             quoteTime: last.date ?? null,
           };
         } catch (e) {
-          console.error(e);
+          console.error('[intraday:catch]', {
+            input,
+            code: code || input,
+            name: name || input,
+            symbol: symbol || null,
+            error: e instanceof Error ? e.message : e,
+          });
           return {
             input,
             code: code || input,
@@ -406,13 +506,23 @@ export async function POST(req: NextRequest) {
 
     const allFailed = results.every((r) => !!r.error);
 
+    console.log('[request:intradayResult]', {
+      allFailed,
+      resultCount: results.length,
+      failedCount: results.filter((r) => !!r.error).length,
+      sample: results.slice(0, 3),
+    });
+
     let finalResults = results;
     let headerNote = '';
 
     if (allFailed) {
+      console.log('[fallback:enter] 全件失敗のため確定データ取得開始');
+
       const fallbackResults: QuoteResult[] = await Promise.all(
         results.map(async (r) => {
           if (!r.code || r.code === '-') {
+            console.error('[fallback:skip] code不正', r);
             return r;
           }
 
@@ -424,7 +534,12 @@ export async function POST(req: NextRequest) {
               error: undefined,
             };
           } catch (e) {
-            console.error(e);
+            console.error('[fallback:catch]', {
+              code: r.code,
+              name: r.name,
+              symbol: `${r.code}.T`,
+              error: e instanceof Error ? e.message : e,
+            });
             return r;
           }
         })
@@ -432,6 +547,12 @@ export async function POST(req: NextRequest) {
 
       finalResults = fallbackResults;
       headerNote = '※ 当日データ取得不可のため前営業日確定データ';
+
+      console.log('[fallback:done]', {
+        successCount: fallbackResults.filter((r) => !r.error).length,
+        failedCount: fallbackResults.filter((r) => !!r.error).length,
+        sample: fallbackResults.slice(0, 3),
+      });
     }
 
     const now = new Date();
@@ -448,6 +569,7 @@ export async function POST(req: NextRequest) {
       pasteText,
     });
   } catch (error) {
+    console.error('[request:outerCatch]', error);
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : '不明なエラーが発生しました',
