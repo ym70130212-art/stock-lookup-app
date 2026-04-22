@@ -38,40 +38,32 @@ function resolveStockByName(input: string): StockMasterRow | null {
   const normalizedInput = normalize(input);
   const rows = stockMaster as StockMasterRow[];
 
-  const exactAlias = rows.find((row) =>
-    (row.aliases || []).some((alias) => normalize(alias) === normalizedInput)
+  return (
+    rows.find((row) =>
+      (row.aliases || []).some((alias) => normalize(alias) === normalizedInput)
+    ) ||
+    rows.find((row) => normalize(row.name) === normalizedInput) ||
+    rows.find((row) =>
+      (row.aliases || []).some(
+        (alias) =>
+          normalize(alias).includes(normalizedInput) ||
+          normalizedInput.includes(normalize(alias))
+      )
+    ) ||
+    rows.find(
+      (row) =>
+        normalize(row.name).includes(normalizedInput) ||
+        normalizedInput.includes(normalize(row.name))
+    ) ||
+    null
   );
-  if (exactAlias) return exactAlias;
-
-  const exactName = rows.find((row) => normalize(row.name) === normalizedInput);
-  if (exactName) return exactName;
-
-  const partialAlias = rows.find((row) =>
-    (row.aliases || []).some(
-      (alias) =>
-        normalize(alias).includes(normalizedInput) ||
-        normalizedInput.includes(normalize(alias))
-    )
-  );
-  if (partialAlias) return partialAlias;
-
-  const partialName = rows.find(
-    (row) =>
-      normalize(row.name).includes(normalizedInput) ||
-      normalizedInput.includes(normalize(row.name))
-  );
-  if (partialName) return partialName;
-
-  return null;
 }
 
 function parseInputs(body: any): string[] {
   const src = body?.inputs;
-
   if (Array.isArray(src)) {
     return src.map((v) => String(v).trim()).filter(Boolean);
   }
-
   return String(src ?? '')
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -79,7 +71,7 @@ function parseInputs(body: any): string[] {
 }
 
 function formatTimestamp(date: Date): string {
-  const parts = new Intl.DateTimeFormat('ja-JP', {
+  return new Intl.DateTimeFormat('ja-JP', {
     timeZone: 'Asia/Tokyo',
     year: 'numeric',
     month: '2-digit',
@@ -87,21 +79,15 @@ function formatTimestamp(date: Date): string {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
-  }).formatToParts(date);
-
-  const map = Object.fromEntries(
-    parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
-  ) as Record<string, string>;
-
-  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}`;
+  })
+    .format(date)
+    .replace(/\//g, '-');
 }
 
 function formatQuoteTime(value: number | Date | null | undefined): string {
   if (!value) return '----.--.-- --:--:--';
-
   const date = value instanceof Date ? value : new Date(value * 1000);
-
-  const parts = new Intl.DateTimeFormat('ja-JP', {
+  return new Intl.DateTimeFormat('ja-JP', {
     timeZone: 'Asia/Tokyo',
     year: 'numeric',
     month: '2-digit',
@@ -110,13 +96,9 @@ function formatQuoteTime(value: number | Date | null | undefined): string {
     minute: '2-digit',
     second: '2-digit',
     hour12: false,
-  }).formatToParts(date);
-
-  const map = Object.fromEntries(
-    parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
-  ) as Record<string, string>;
-
-  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
+  })
+    .format(date)
+    .replace(/\//g, '-');
 }
 
 function formatVolume(volume: number | null): string {
@@ -125,12 +107,7 @@ function formatVolume(volume: number | null): string {
 }
 
 function formatSignedNumber(value: number): string {
-  const rounded =
-    Math.abs(value) >= 1
-      ? Math.round(value)
-      : Number(value.toFixed(1));
-
-  return `${rounded >= 0 ? '+' : ''}${rounded}`;
+  return `${value >= 0 ? '+' : ''}${Math.round(value)}`;
 }
 
 function formatSignedPercent(value: number): string {
@@ -138,12 +115,7 @@ function formatSignedPercent(value: number): string {
 }
 
 function formatPrice(value: number): string {
-  const rounded =
-    Math.abs(value - Math.round(value)) < 0.000001
-      ? Math.round(value)
-      : Number(value.toFixed(1));
-
-  return String(rounded);
+  return Math.round(value).toString();
 }
 
 function toPasteLine(result: QuoteResult): string {
@@ -156,60 +128,50 @@ function toPasteLine(result: QuoteResult): string {
     return `${result.code || result.input} ${result.name || '-'} 取得失敗`;
   }
 
-  const priceStr = formatPrice(result.price);
-  const changeStr = formatSignedNumber(result.change);
-  const changePctStr = formatSignedPercent(result.changePercent);
-
-  const openDiffStr =
-    result.openDiff !== null ? formatSignedNumber(result.openDiff) : '-';
-  const openDiffPctStr =
-    result.openDiffPercent !== null ? formatSignedPercent(result.openDiffPercent) : '-';
-
-  const volumeStr = formatVolume(result.totalVolume);
-  const timeStr = formatQuoteTime(result.quoteTime);
-
-  return `${result.code} ${result.name} ${priceStr} ${changeStr} (${changePctStr}) / 始値比 ${openDiffStr} (${openDiffPctStr}) 出来高 ${volumeStr} [${timeStr}]`;
+  return `${result.code} ${result.name} ${formatPrice(result.price)} ${formatSignedNumber(result.change)} (${formatSignedPercent(result.changePercent)}) / 始値比 ${formatSignedNumber(result.openDiff ?? 0)} (${formatSignedPercent(result.openDiffPercent ?? 0)}) 出来高 ${formatVolume(result.totalVolume)} [${formatQuoteTime(result.quoteTime)}]`;
 }
 
 function getTodayRangeInJst() {
   const now = new Date();
-
-  const parts = new Intl.DateTimeFormat('en-CA', {
+  const ymd = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Tokyo',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).formatToParts(now);
+  }).format(now);
 
-  const map = Object.fromEntries(
-    parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
-  ) as Record<string, string>;
+  return {
+    period1: `${ymd}T00:00:00+09:00`,
+    period2: `${ymd}T23:59:59+09:00`,
+  };
+}
 
-  const ymd = `${map.year}-${map.month}-${map.day}`;
-  const period1 = `${ymd}T00:00:00+09:00`;
-  const period2 = `${ymd}T23:59:59+09:00`;
+async function fetchConfirmed(symbol: string) {
+  const data = await yf.historical(symbol, { period1: '10d', interval: '1d' });
+  if (!data || data.length < 2) throw new Error();
 
-  return { period1, period2 };
+  const last = data[data.length - 1];
+  const prev = data[data.length - 2];
+
+  return {
+    price: last.close,
+    change: last.close - prev.close,
+    changePercent: ((last.close - prev.close) / prev.close) * 100,
+    openDiff: last.close - last.open,
+    openDiffPercent: ((last.close - last.open) / last.open) * 100,
+    totalVolume: last.volume,
+    quoteTime: null,
+  };
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const rawInputs = parseInputs(body);
-
-    if (rawInputs.length === 0) {
-      return NextResponse.json(
-        { error: '入力が空です。1行に1銘柄ずつ入力してください。' },
-        { status: 400 }
-      );
-    }
-
-    const limitedInputs = rawInputs.slice(0, 20);
-    const masterRows = stockMaster as StockMasterRow[];
+    const inputs = parseInputs(body).slice(0, 20);
     const { period1, period2 } = getTodayRangeInJst();
 
     const results: QuoteResult[] = await Promise.all(
-      limitedInputs.map(async (input) => {
+      inputs.map(async (input) => {
         let code = '';
         let name = '';
         let symbol = '';
@@ -219,106 +181,37 @@ export async function POST(req: NextRequest) {
           symbol = `${input}.T`;
         } else {
           const resolved = resolveStockByName(input);
-
-          if (!resolved) {
-            return {
-              input,
-              code: '-',
-              name: '-',
-              price: null,
-              change: null,
-              changePercent: null,
-              openDiff: null,
-              openDiffPercent: null,
-              totalVolume: null,
-              quoteTime: null,
-              error: '銘柄不明',
-            };
-          }
-
+          if (!resolved) return { input, code: '-', name: '-', price: null, change: null, changePercent: null, openDiff: null, openDiffPercent: null, totalVolume: null, quoteTime: null, error: '銘柄不明' };
           code = resolved.code;
           name = resolved.name;
           symbol = `${code}.T`;
         }
 
         try {
-          const chart = await yf.chart(symbol, {
-            interval: '1m',
-            period1,
-            period2,
-          });
+          const chart = await yf.chart(symbol, { interval: '1m', period1, period2 });
+          const quotes = chart.quotes ?? [];
+          const valid = quotes.filter(q => q.close && q.date);
 
-          const quoteSeries = chart.quotes ?? [];
-          const validQuotes = quoteSeries.filter(
-            (q) =>
-              q.close !== null &&
-              q.close !== undefined &&
-              q.date !== null &&
-              q.date !== undefined
-          );
+          if (valid.length === 0) throw new Error();
 
-          if (validQuotes.length === 0) {
-            throw new Error('当日1分足データなし');
-          }
+          const first = valid[0];
+          const last = valid[valid.length - 1];
 
-          const last = validQuotes[validQuotes.length - 1];
-          const price = last.close ?? null;
-
-          const prevClose =
-            chart.meta?.previousClose ??
-            chart.meta?.chartPreviousClose ??
-            null;
-
-          const openPrice =
-            validQuotes.find(
-              (q) => q.open !== null && q.open !== undefined
-            )?.open ?? null;
-
-          const change =
-            price !== null && prevClose !== null ? price - prevClose : null;
-
-          const changePercent =
-            change !== null && prevClose
-              ? (change / prevClose) * 100
-              : null;
-
-          const openDiff =
-            price !== null && openPrice !== null ? price - openPrice : null;
-
-          const openDiffPercent =
-            openDiff !== null && openPrice
-              ? (openDiff / openPrice) * 100
-              : null;
-
-          const totalVolume = validQuotes.reduce((sum, q) => {
-            return sum + (q.volume ?? 0);
-          }, 0);
-
-          const matched = masterRows.find((row) => row.code === code);
-
-          const displayName =
-            name ||
-            matched?.name ||
-            (typeof chart.meta?.longName === 'string' && chart.meta.longName.trim()
-              ? chart.meta.longName
-              : typeof chart.meta?.shortName === 'string' && chart.meta.shortName.trim()
-                ? chart.meta.shortName
-                : input);
+          const prevClose = chart.meta?.previousClose ?? chart.meta?.chartPreviousClose;
 
           return {
             input,
             code,
-            name: displayName,
-            price,
-            change,
-            changePercent,
-            openDiff,
-            openDiffPercent,
-            totalVolume,
-            quoteTime: last.date ?? null,
+            name,
+            price: last.close,
+            change: last.close - prevClose,
+            changePercent: ((last.close - prevClose) / prevClose) * 100,
+            openDiff: last.close - first.open,
+            openDiffPercent: ((last.close - first.open) / first.open) * 100,
+            totalVolume: valid.reduce((s, q) => s + (q.volume ?? 0), 0),
+            quoteTime: last.date,
           };
-        } catch (e) {
-          console.error(e);
+        } catch {
           return {
             input,
             code: code || input,
@@ -336,24 +229,35 @@ export async function POST(req: NextRequest) {
       })
     );
 
-    const now = new Date();
-    const fetchedAt = formatTimestamp(now);
+    // ★ここが今回の追加ロジック
+    const allFailed = results.every(r => r.error);
 
-    const pasteText =
-      `取得時刻: ${fetchedAt}\n\n` +
-      results.map(toPasteLine).join('\n');
+    let finalResults = results;
+    let headerNote = '';
 
-    return NextResponse.json({
-      fetchedAt,
-      results,
-      pasteText,
-    });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : '不明なエラーが発生しました',
-      },
-      { status: 500 }
-    );
+    if (allFailed) {
+      const fallback = await Promise.all(
+        results.map(async (r) => {
+          try {
+            const symbol = `${r.code}.T`;
+            const data = await fetchConfirmed(symbol);
+            return { ...r, ...data, error: undefined };
+          } catch {
+            return r;
+          }
+        })
+      );
+      finalResults = fallback;
+      headerNote = '※ 当日データ取得不可のため前営業日確定データ';
+    }
+
+    const text =
+      `取得時刻: ${formatTimestamp(new Date())}\n` +
+      (headerNote ? `${headerNote}\n` : '\n') +
+      finalResults.map(toPasteLine).join('\n');
+
+    return NextResponse.json({ pasteText: text });
+  } catch (e) {
+    return NextResponse.json({ error: '取得失敗' }, { status: 500 });
   }
 }
