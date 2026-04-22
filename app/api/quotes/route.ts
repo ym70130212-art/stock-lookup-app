@@ -192,9 +192,19 @@ function getTodayRangeInJst() {
   return { period1, period2 };
 }
 
+function getHistoricalRange() {
+  const now = new Date();
+  const period2 = now;
+  const period1 = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+  return { period1, period2 };
+}
+
 async function fetchConfirmedQuote(symbol: string) {
+  const { period1, period2 } = getHistoricalRange();
+
   const rows = await yf.historical(symbol, {
-    period1: '10d',
+    period1,
+    period2,
     interval: '1d',
   });
 
@@ -202,8 +212,21 @@ async function fetchConfirmedQuote(symbol: string) {
     throw new Error('確定データ不足');
   }
 
-  const last = rows[rows.length - 1];
-  const prev = rows[rows.length - 2];
+  const validRows = rows.filter(
+    (row) =>
+      row &&
+      row.open !== null &&
+      row.open !== undefined &&
+      row.close !== null &&
+      row.close !== undefined
+  );
+
+  if (validRows.length < 2) {
+    throw new Error('確定データ有効件数不足');
+  }
+
+  const last = validRows[validRows.length - 1];
+  const prev = validRows[validRows.length - 2];
 
   const lastClose = Number(last.close);
   const prevClose = Number(prev.close);
@@ -222,9 +245,9 @@ async function fetchConfirmedQuote(symbol: string) {
   return {
     price: lastClose,
     change: lastClose - prevClose,
-    changePercent: ((lastClose - prevClose) / prevClose) * 100,
+    changePercent: prevClose !== 0 ? ((lastClose - prevClose) / prevClose) * 100 : null,
     openDiff: lastClose - lastOpen,
-    openDiffPercent: ((lastClose - lastOpen) / lastOpen) * 100,
+    openDiffPercent: lastOpen !== 0 ? ((lastClose - lastOpen) / lastOpen) * 100 : null,
     totalVolume: lastVolume,
     quoteTime: null,
   };
