@@ -193,10 +193,26 @@ function getTodayRangeInJst() {
 }
 
 function getHistoricalRange() {
-  const now = new Date();
-  const period2 = now;
-  const period1 = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
-  return { period1, period2 };
+  const now = new Date()
+
+  const yesterday = new Date(
+    now.getTime() - 24 * 60 * 60 * 1000
+  )
+
+  const period2 = new Date(
+    yesterday.getFullYear(),
+    yesterday.getMonth(),
+    yesterday.getDate(),
+    23,
+    59,
+    59
+  )
+
+  const period1 = new Date(
+    period2.getTime() - 14 * 24 * 60 * 60 * 1000
+  )
+
+  return { period1, period2 }
 }
 
 async function fetchConfirmedQuote(symbol: string) {
