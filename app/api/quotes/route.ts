@@ -360,9 +360,17 @@ export async function POST(req: NextRequest) {
         let symbol = '';
 
         if (/^\d{4}$/.test(input)) {
-          code = input;
-          symbol = `${input}.T`;
-        } else {
+  code = input;
+  symbol = `${input}.T`;
+
+  const matched = masterRows.find(
+    (row) => String(row.code) === String(code)
+  );
+
+  if (matched) {
+    name = matched.name;
+  }
+}else {
           const resolved = resolveStockByName(input);
 
           if (!resolved) {
