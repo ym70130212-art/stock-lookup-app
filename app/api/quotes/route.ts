@@ -4,6 +4,9 @@ import stockMaster from '../../../data/jp-stocks.json';
 
 const yf = new yahooFinance();
 
+const MAX_INPUTS = 100;
+const BATCH_SIZE = 20;
+
 type StockMasterRow = {
   code: string;
   name: string;
@@ -193,11 +196,8 @@ function getTodayRangeInJst() {
 }
 
 function getHistoricalRange() {
-  const now = new Date()
-
-  const yesterday = new Date(
-    now.getTime() - 24 * 60 * 60 * 1000
-  )
+  const now = new Date();
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
   const period2 = new Date(
     yesterday.getFullYear(),
@@ -206,13 +206,19 @@ function getHistoricalRange() {
     23,
     59,
     59
-  )
+  );
 
-  const period1 = new Date(
-    period2.getTime() - 14 * 24 * 60 * 60 * 1000
-  )
+  const period1 = new Date(period2.getTime() - 14 * 24 * 60 * 60 * 1000);
 
-  return { period1, period2 }
+  return { period1, period2 };
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
 }
 
 async function fetchConfirmedQuote(symbol: string) {
@@ -330,6 +336,184 @@ async function fetchConfirmedQuote(symbol: string) {
   return result;
 }
 
+async function fetchIntradayQuote(
+  input: string,
+  masterRows: StockMasterRow[],
+  period1: string,
+  period2: string
+): Promise<QuoteResult> {
+  let code = '';
+  let name = '';
+  let symbol = '';
+
+  if (/^\d{4}$/.test(input)) {
+    code = input;
+    symbol = `${input}.T`;
+
+    const matched = masterRows.find(
+      (row) => String(row.code) === String(code)
+    );
+
+    if (matched) {
+      name = matched.name;
+    }
+  } else {
+    const resolved = resolveStockByName(input);
+
+    if (!resolved) {
+      console.error('[intraday:error] 銘柄不明', { input });
+      return {
+        input,
+        code: '-',
+        name: '-',
+        price: null,
+        change: null,
+        changePercent: null,
+        openDiff: null,
+        openDiffPercent: null,
+        totalVolume: null,
+        quoteTime: null,
+        error: '銘柄不明',
+      };
+    }
+
+    code = resolved.code;
+    name = resolved.name;
+    symbol = `${code}.T`;
+  }
+
+  try {
+    const chart = await yf.chart(symbol, {
+      interval: '1m',
+      period1,
+      period2,
+    });
+
+    const quoteSeries = chart.quotes ?? [];
+    const validQuotes = quoteSeries.filter(
+      (q) =>
+        q.close !== null &&
+        q.close !== undefined &&
+        q.date !== null &&
+        q.date !== undefined
+    );
+
+    if (validQuotes.length === 0) {
+      console.error('[intraday:error] 当日1分足データなし', {
+        input,
+        code,
+        name,
+        symbol,
+        quoteSeriesLength: quoteSeries.length,
+      });
+      throw new Error('当日1分足データなし');
+    }
+
+    const firstWithOpen = validQuotes.find(
+      (q) => q.open !== null && q.open !== undefined
+    );
+
+    if (!firstWithOpen) {
+      console.error('[intraday:error] 始値データなし', {
+        input,
+        code,
+        name,
+        symbol,
+        validQuotesLength: validQuotes.length,
+      });
+      throw new Error('始値データなし');
+    }
+
+    const last = validQuotes[validQuotes.length - 1];
+
+    const lastClose = Number(last.close);
+    const firstOpen = Number(firstWithOpen.open);
+
+    const prevCloseRaw =
+      chart.meta?.previousClose ??
+      chart.meta?.chartPreviousClose ??
+      null;
+
+    if (
+      !Number.isFinite(lastClose) ||
+      !Number.isFinite(firstOpen) ||
+      !Number.isFinite(prevCloseRaw)
+    ) {
+      console.error('[intraday:error] 数値不正', {
+        input,
+        code,
+        name,
+        symbol,
+        last,
+        firstWithOpen,
+        prevCloseRaw,
+        lastClose,
+        firstOpen,
+      });
+      throw new Error('数値不正');
+    }
+
+    const prevClose = Number(prevCloseRaw);
+
+    const change = lastClose - prevClose;
+    const changePercent =
+      prevClose !== 0 ? (change / prevClose) * 100 : null;
+
+    const openDiff = lastClose - firstOpen;
+    const openDiffPercent =
+      firstOpen !== 0 ? (openDiff / firstOpen) * 100 : null;
+
+    const totalVolume = validQuotes.reduce((sum, q) => {
+      return sum + (q.volume ?? 0);
+    }, 0);
+
+    const matched = masterRows.find((row) => row.code === code);
+
+    const displayName =
+      name ||
+      matched?.name ||
+      (typeof chart.meta?.longName === 'string' && chart.meta.longName.trim()
+        ? chart.meta.longName
+        : typeof chart.meta?.shortName === 'string' && chart.meta.shortName.trim()
+          ? chart.meta.shortName
+          : input);
+
+    return {
+      input,
+      code,
+      name: displayName,
+      price: lastClose,
+      change,
+      changePercent,
+      openDiff,
+      openDiffPercent,
+      totalVolume,
+      quoteTime: last.date ?? null,
+    };
+  } catch (e) {
+    console.error('[intraday:catch]', {
+      input,
+      code: code || input,
+      name: name || input,
+      symbol: symbol || null,
+      error: e instanceof Error ? e.message : e,
+    });
+    return {
+      input,
+      code: code || input,
+      name: name || input,
+      price: null,
+      change: null,
+      changePercent: null,
+      openDiff: null,
+      openDiffPercent: null,
+      totalVolume: null,
+      quoteTime: null,
+      error: '取得失敗',
+    };
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -342,191 +526,45 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const limitedInputs = rawInputs.slice(0, 20);
+    const limitedInputs = rawInputs.slice(0, MAX_INPUTS);
     const masterRows = stockMaster as StockMasterRow[];
     const { period1, period2 } = getTodayRangeInJst();
 
     console.log('[request:start]', {
-      rawInputs,
-      limitedInputs,
+      inputCount: rawInputs.length,
+      limitedCount: limitedInputs.length,
+      maxInputs: MAX_INPUTS,
+      batchSize: BATCH_SIZE,
       period1,
       period2,
     });
 
-    const results: QuoteResult[] = await Promise.all(
-      limitedInputs.map(async (input) => {
-        let code = '';
-        let name = '';
-        let symbol = '';
+    const inputBatches = chunkArray(limitedInputs, BATCH_SIZE);
+    const results: QuoteResult[] = [];
 
-        if (/^\d{4}$/.test(input)) {
-  code = input;
-  symbol = `${input}.T`;
+    for (let i = 0; i < inputBatches.length; i += 1) {
+      const batch = inputBatches[i];
 
-  const matched = masterRows.find(
-    (row) => String(row.code) === String(code)
-  );
+      console.log('[request:batch:start]', {
+        batchIndex: i + 1,
+        batchCount: inputBatches.length,
+        batchSize: batch.length,
+      });
 
-  if (matched) {
-    name = matched.name;
-  }
-}else {
-          const resolved = resolveStockByName(input);
+      const batchResults = await Promise.all(
+        batch.map((input) =>
+          fetchIntradayQuote(input, masterRows, period1, period2)
+        )
+      );
 
-          if (!resolved) {
-            console.error('[intraday:error] 銘柄不明', { input });
-            return {
-              input,
-              code: '-',
-              name: '-',
-              price: null,
-              change: null,
-              changePercent: null,
-              openDiff: null,
-              openDiffPercent: null,
-              totalVolume: null,
-              quoteTime: null,
-              error: '銘柄不明',
-            };
-          }
+      results.push(...batchResults);
 
-          code = resolved.code;
-          name = resolved.name;
-          symbol = `${code}.T`;
-        }
-
-        try {
-          const chart = await yf.chart(symbol, {
-            interval: '1m',
-            period1,
-            period2,
-          });
-
-          const quoteSeries = chart.quotes ?? [];
-          const validQuotes = quoteSeries.filter(
-            (q) =>
-              q.close !== null &&
-              q.close !== undefined &&
-              q.date !== null &&
-              q.date !== undefined
-          );
-
-          if (validQuotes.length === 0) {
-            console.error('[intraday:error] 当日1分足データなし', {
-              input,
-              code,
-              name,
-              symbol,
-              quoteSeriesLength: quoteSeries.length,
-            });
-            throw new Error('当日1分足データなし');
-          }
-
-          const firstWithOpen = validQuotes.find(
-            (q) => q.open !== null && q.open !== undefined
-          );
-
-          if (!firstWithOpen) {
-            console.error('[intraday:error] 始値データなし', {
-              input,
-              code,
-              name,
-              symbol,
-              validQuotesLength: validQuotes.length,
-            });
-            throw new Error('始値データなし');
-          }
-
-          const last = validQuotes[validQuotes.length - 1];
-
-          const lastClose = Number(last.close);
-          const firstOpen = Number(firstWithOpen.open);
-
-          const prevCloseRaw =
-            chart.meta?.previousClose ??
-            chart.meta?.chartPreviousClose ??
-            null;
-
-          if (
-            !Number.isFinite(lastClose) ||
-            !Number.isFinite(firstOpen) ||
-            !Number.isFinite(prevCloseRaw)
-          ) {
-            console.error('[intraday:error] 数値不正', {
-              input,
-              code,
-              name,
-              symbol,
-              last,
-              firstWithOpen,
-              prevCloseRaw,
-              lastClose,
-              firstOpen,
-            });
-            throw new Error('数値不正');
-          }
-
-          const prevClose = Number(prevCloseRaw);
-
-          const change = lastClose - prevClose;
-          const changePercent =
-            prevClose !== 0 ? (change / prevClose) * 100 : null;
-
-          const openDiff = lastClose - firstOpen;
-          const openDiffPercent =
-            firstOpen !== 0 ? (openDiff / firstOpen) * 100 : null;
-
-          const totalVolume = validQuotes.reduce((sum, q) => {
-            return sum + (q.volume ?? 0);
-          }, 0);
-
-          const matched = masterRows.find((row) => row.code === code);
-
-          const displayName =
-            name ||
-            matched?.name ||
-            (typeof chart.meta?.longName === 'string' && chart.meta.longName.trim()
-              ? chart.meta.longName
-              : typeof chart.meta?.shortName === 'string' && chart.meta.shortName.trim()
-                ? chart.meta.shortName
-                : input);
-
-          return {
-            input,
-            code,
-            name: displayName,
-            price: lastClose,
-            change,
-            changePercent,
-            openDiff,
-            openDiffPercent,
-            totalVolume,
-            quoteTime: last.date ?? null,
-          };
-        } catch (e) {
-          console.error('[intraday:catch]', {
-            input,
-            code: code || input,
-            name: name || input,
-            symbol: symbol || null,
-            error: e instanceof Error ? e.message : e,
-          });
-          return {
-            input,
-            code: code || input,
-            name: name || input,
-            price: null,
-            change: null,
-            changePercent: null,
-            openDiff: null,
-            openDiffPercent: null,
-            totalVolume: null,
-            quoteTime: null,
-            error: '取得失敗',
-          };
-        }
-      })
-    );
+      console.log('[request:batch:done]', {
+        batchIndex: i + 1,
+        successCount: batchResults.filter((r) => !r.error).length,
+        failedCount: batchResults.filter((r) => !!r.error).length,
+      });
+    }
 
     const allFailed = results.every((r) => !!r.error);
 
@@ -543,31 +581,52 @@ export async function POST(req: NextRequest) {
     if (allFailed) {
       console.log('[fallback:enter] 全件失敗のため確定データ取得開始');
 
-      const fallbackResults: QuoteResult[] = await Promise.all(
-        results.map(async (r) => {
-          if (!r.code || r.code === '-') {
-            console.error('[fallback:skip] code不正', r);
-            return r;
-          }
+      const resultBatches = chunkArray(results, BATCH_SIZE);
+      const fallbackResults: QuoteResult[] = [];
 
-          try {
-            const confirmed = await fetchConfirmedQuote(`${r.code}.T`);
-            return {
-              ...r,
-              ...confirmed,
-              error: undefined,
-            };
-          } catch (e) {
-            console.error('[fallback:catch]', {
-              code: r.code,
-              name: r.name,
-              symbol: `${r.code}.T`,
-              error: e instanceof Error ? e.message : e,
-            });
-            return r;
-          }
-        })
-      );
+      for (let i = 0; i < resultBatches.length; i += 1) {
+        const batch = resultBatches[i];
+
+        console.log('[fallback:batch:start]', {
+          batchIndex: i + 1,
+          batchCount: resultBatches.length,
+          batchSize: batch.length,
+        });
+
+        const batchFallbackResults = await Promise.all(
+          batch.map(async (r) => {
+            if (!r.code || r.code === '-') {
+              console.error('[fallback:skip] code不正', r);
+              return r;
+            }
+
+            try {
+              const confirmed = await fetchConfirmedQuote(`${r.code}.T`);
+              return {
+                ...r,
+                ...confirmed,
+                error: undefined,
+              };
+            } catch (e) {
+              console.error('[fallback:catch]', {
+                code: r.code,
+                name: r.name,
+                symbol: `${r.code}.T`,
+                error: e instanceof Error ? e.message : e,
+              });
+              return r;
+            }
+          })
+        );
+
+        fallbackResults.push(...batchFallbackResults);
+
+        console.log('[fallback:batch:done]', {
+          batchIndex: i + 1,
+          successCount: batchFallbackResults.filter((r) => !r.error).length,
+          failedCount: batchFallbackResults.filter((r) => !!r.error).length,
+        });
+      }
 
       finalResults = fallbackResults;
       headerNote = '※ 当日データ取得不可のため前営業日確定データ';
