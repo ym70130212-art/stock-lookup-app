@@ -6,6 +6,8 @@ const yf = new yahooFinance();
 
 const MAX_INPUTS = 100;
 const BATCH_SIZE = 20;
+const FALLBACK_SEARCH_DAYS = 7;
+const PREVIOUS_CLOSE_SEARCH_DAYS = 10;
 
 type StockMasterRow = {
   code: string;
@@ -195,31 +197,56 @@ function getTodayRangeInJst() {
   return { period1, period2 };
 }
 
-function getHistoricalRange() {
-  const now = new Date();
-
-  const todayJstParts = new Intl.DateTimeFormat('en-CA', {
+function getCurrentJstParts() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Tokyo',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).formatToParts(now);
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+
+  return Object.fromEntries(
+    parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
+  ) as Record<string, string>;
+}
+
+function getJstYmdByOffset(offsetDays: number): string {
+  const current = getCurrentJstParts();
+  const todayJst = new Date(`${current.year}-${current.month}-${current.day}T00:00:00+09:00`);
+  const target = new Date(todayJst.getTime() + offsetDays * 24 * 60 * 60 * 1000);
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(target);
 
   const map = Object.fromEntries(
-    todayJstParts
-      .filter((p) => p.type !== 'literal')
-      .map((p) => [p.type, p.value])
+    parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
   ) as Record<string, string>;
 
-  const todayJstYmd = `${map.year}-${map.month}-${map.day}`;
-
-  // Yahooの日足 timestamp がJST深夜〜午前側に寄ることがあるため、
-  // 00:00ではなく12:00を終点にして前営業日確定足を確実に含める。
-  const period2 = new Date(`${todayJstYmd}T12:00:00+09:00`);
-  const period1 = new Date(period2.getTime() - 14 * 24 * 60 * 60 * 1000);
-
-  return { period1, period2 };
+  return `${map.year}-${map.month}-${map.day}`;
 }
+
+function getIntradayRangeForJstYmd(ymd: string) {
+  return {
+    period1: `${ymd}T00:00:00+09:00`,
+    period2: `${ymd}T23:59:59+09:00`,
+  };
+}
+
+function shouldTryTodayAsConfirmed(): boolean {
+  const current = getCurrentJstParts();
+  const hour = Number(current.hour);
+  const minute = Number(current.minute);
+
+  return hour > 15 || (hour === 15 && minute >= 30);
+}
+
 function chunkArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < items.length; i += size) {
@@ -228,90 +255,170 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
-async function fetchConfirmedQuote(symbol: string) {
-  const now = new Date();
-
-  const period2 = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-  const period1 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-  console.log('[fallback:start]', {
-    symbol,
-    period1: period1.toISOString(),
-    period2: period2.toISOString(),
-  });
+async function fetchValidIntradayQuotesForDate(symbol: string, ymd: string) {
+  const { period1, period2 } = getIntradayRangeForJstYmd(ymd);
 
   const chart = await yf.chart(symbol, {
-    interval: '1d',
+    interval: '1m',
     period1,
     period2,
   });
 
-  const rows = chart.quotes ?? [];
-
-  console.log('[fallback:rawRows]', {
-    symbol,
-    rowCount: rows.length,
-    firstRow: rows.length > 0 ? rows[0] : null,
-    lastRow: rows.length > 0 ? rows[rows.length - 1] : null,
-  });
-
-  const validRows = rows.filter(
-    (row) =>
-      row &&
-      row.date !== null &&
-      row.date !== undefined &&
-      row.open !== null &&
-      row.open !== undefined &&
-      row.close !== null &&
-      row.close !== undefined
+  const quoteSeries = chart.quotes ?? [];
+  const validQuotes = quoteSeries.filter(
+    (q) =>
+      q.date !== null &&
+      q.date !== undefined &&
+      q.close !== null &&
+      q.close !== undefined
   );
 
-  console.log('[fallback:validRows]', {
-    symbol,
-    validCount: validRows.length,
-    validFirst: validRows.length > 0 ? validRows[0] : null,
-    validLast: validRows.length > 0 ? validRows[validRows.length - 1] : null,
-  });
+  return { chart, validQuotes };
+}
 
-  if (validRows.length < 2) {
-    throw new Error('確定データ有効件数不足');
+async function findPreviousTradingDayClose(symbol: string, baseYmd: string) {
+  const baseDate = new Date(`${baseYmd}T00:00:00+09:00`);
+
+  for (let i = 1; i <= PREVIOUS_CLOSE_SEARCH_DAYS; i += 1) {
+    const targetDate = new Date(baseDate.getTime() - i * 24 * 60 * 60 * 1000);
+
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Tokyo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(targetDate);
+
+    const map = Object.fromEntries(
+      parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])
+    ) as Record<string, string>;
+
+    const targetYmd = `${map.year}-${map.month}-${map.day}`;
+
+    try {
+      const { validQuotes } = await fetchValidIntradayQuotesForDate(symbol, targetYmd);
+
+      if (validQuotes.length === 0) {
+        continue;
+      }
+
+      const last = validQuotes[validQuotes.length - 1];
+      const close = Number(last.close);
+
+      if (Number.isFinite(close)) {
+        return close;
+      }
+    } catch (e) {
+      console.error('[fallback:prevClose:catch]', {
+        symbol,
+        targetYmd,
+        error: e instanceof Error ? e.message : e,
+      });
+    }
   }
 
-  const last = validRows[validRows.length - 1];
-  const prev = validRows[validRows.length - 2];
+  return null;
+}
 
-  const lastClose = Number(last.close);
-  const prevClose = Number(prev.close);
-  const lastOpen = Number(last.open);
-  const lastVolume = Number(last.volume ?? 0);
+async function fetchConfirmedQuote(symbol: string) {
+  const startDaysBack = shouldTryTodayAsConfirmed() ? 0 : 1;
 
-  if (
-    !Number.isFinite(lastClose) ||
-    !Number.isFinite(prevClose) ||
-    !Number.isFinite(lastOpen) ||
-    !Number.isFinite(lastVolume)
-  ) {
-    throw new Error('確定データ数値不正');
-  }
-
-  const result = {
-    price: lastClose,
-    change: lastClose - prevClose,
-    changePercent: prevClose !== 0 ? ((lastClose - prevClose) / prevClose) * 100 : null,
-    openDiff: lastClose - lastOpen,
-    openDiffPercent: lastOpen !== 0 ? ((lastClose - lastOpen) / lastOpen) * 100 : null,
-    totalVolume: lastVolume,
-    quoteTime: null,
-  };
-
-  console.log('[fallback:success]', {
+  console.log('[fallback:start]', {
     symbol,
-    lastDate: last.date,
-    prevDate: prev.date,
-    result,
+    startDaysBack,
+    searchDays: FALLBACK_SEARCH_DAYS,
   });
 
-  return result;
+  for (let offset = startDaysBack; offset <= FALLBACK_SEARCH_DAYS; offset += 1) {
+    const ymd = getJstYmdByOffset(-offset);
+
+    try {
+      console.log('[fallback:tryDate]', {
+        symbol,
+        ymd,
+      });
+
+      const { chart, validQuotes } = await fetchValidIntradayQuotesForDate(symbol, ymd);
+
+      console.log('[fallback:intradayRows]', {
+        symbol,
+        ymd,
+        validCount: validQuotes.length,
+        firstRow: validQuotes.length > 0 ? validQuotes[0] : null,
+        lastRow: validQuotes.length > 0 ? validQuotes[validQuotes.length - 1] : null,
+      });
+
+      if (validQuotes.length === 0) {
+        continue;
+      }
+
+      const firstWithOpen = validQuotes.find(
+        (q) => q.open !== null && q.open !== undefined
+      );
+
+      if (!firstWithOpen) {
+        continue;
+      }
+
+      const last = validQuotes[validQuotes.length - 1];
+
+      const lastClose = Number(last.close);
+      const lastOpen = Number(firstWithOpen.open);
+
+      if (!Number.isFinite(lastClose) || !Number.isFinite(lastOpen)) {
+        continue;
+      }
+
+      let previousClose =
+        typeof chart.meta?.previousClose === 'number'
+          ? Number(chart.meta.previousClose)
+          : typeof chart.meta?.chartPreviousClose === 'number'
+            ? Number(chart.meta.chartPreviousClose)
+            : null;
+
+      if (!Number.isFinite(previousClose)) {
+        previousClose = await findPreviousTradingDayClose(symbol, ymd);
+      }
+
+      if (previousClose === null || !Number.isFinite(previousClose)) {
+        continue;
+      }
+
+      const totalVolume = validQuotes.reduce((sum, q) => {
+        return sum + (q.volume ?? 0);
+      }, 0);
+
+      const result = {
+        price: lastClose,
+        change: lastClose - previousClose,
+        changePercent:
+          previousClose !== 0 ? ((lastClose - previousClose) / previousClose) * 100 : null,
+        openDiff: lastClose - lastOpen,
+        openDiffPercent:
+          lastOpen !== 0 ? ((lastClose - lastOpen) / lastOpen) * 100 : null,
+        totalVolume,
+        quoteTime: null,
+      };
+
+      console.log('[fallback:success]', {
+        symbol,
+        ymd,
+        lastDate: last.date,
+        previousClose,
+        result,
+      });
+
+      return result;
+    } catch (e) {
+      console.error('[fallback:tryDate:catch]', {
+        symbol,
+        ymd,
+        error: e instanceof Error ? e.message : e,
+      });
+    }
+  }
+
+  throw new Error('直近取引日の1分足確定データ取得失敗');
 }
 
 async function fetchIntradayQuote(
@@ -325,44 +432,43 @@ async function fetchIntradayQuote(
   let symbol = '';
 
   if (/^\d{4}$|^\d{3}[A-Z]$/i.test(input)) {
-  code = input.toUpperCase();
-  symbol = `${code}.T`;
+    code = input.toUpperCase();
+    symbol = `${code}.T`;
 
-  const matched = masterRows.find(
-    (row) =>
-      String(row.code).toUpperCase() === String(code)
-  );
+    const matched = masterRows.find(
+      (row) => String(row.code).toUpperCase() === String(code)
+    );
 
-  if (matched) {
-    name = matched.name;
+    if (matched) {
+      name = matched.name;
+    } else {
+      name = code;
+    }
   } else {
-    name = code;
+    const resolved = resolveStockByName(input);
+
+    if (!resolved) {
+      console.error('[intraday:error] 銘柄不明', { input });
+
+      return {
+        input,
+        code: '-',
+        name: '-',
+        price: null,
+        change: null,
+        changePercent: null,
+        openDiff: null,
+        openDiffPercent: null,
+        totalVolume: null,
+        quoteTime: null,
+        error: '銘柄不明',
+      };
+    }
+
+    code = resolved.code;
+    name = resolved.name;
+    symbol = `${code}.T`;
   }
-} else {
-  const resolved = resolveStockByName(input);
-
-  if (!resolved) {
-    console.error('[intraday:error] 銘柄不明', { input });
-
-return {
-  input,
-  code: '-',
-  name: '-',
-  price: null,
-  change: null,
-  changePercent: null,
-  openDiff: null,
-  openDiffPercent: null,
-  totalVolume: null,
-  quoteTime: null,
-  error: '銘柄不明',
-};
-  }
-
-code = resolved.code;
-name = resolved.name;
-symbol = `${code}.T`;
-}
 
   try {
     const chart = await yf.chart(symbol, {
@@ -480,6 +586,7 @@ symbol = `${code}.T`;
       symbol: symbol || null,
       error: e instanceof Error ? e.message : e,
     });
+
     return {
       input,
       code: code || input,
@@ -561,7 +668,7 @@ export async function POST(req: NextRequest) {
     let headerNote = '';
 
     if (allFailed) {
-      console.log('[fallback:enter] 全件失敗のため確定データ取得開始');
+      console.log('[fallback:enter] 全件失敗のため直近取引日の1分足確定データ取得開始');
 
       const resultBatches = chunkArray(results, BATCH_SIZE);
       const fallbackResults: QuoteResult[] = [];
@@ -611,7 +718,7 @@ export async function POST(req: NextRequest) {
       }
 
       finalResults = fallbackResults;
-      headerNote = '※ 当日データ取得不可のため前営業日確定データ';
+      headerNote = '※ 当日データ取得不可のため直近取引日の1分足確定データ';
 
       console.log('[fallback:done]', {
         successCount: fallbackResults.filter((r) => !r.error).length,
