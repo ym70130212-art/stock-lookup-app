@@ -229,7 +229,10 @@ function chunkArray<T>(items: T[], size: number): T[][] {
 }
 
 async function fetchConfirmedQuote(symbol: string) {
-  const { period1, period2 } = getHistoricalRange();
+  const now = new Date();
+
+  const period2 = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const period1 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
   console.log('[fallback:start]', {
     symbol,
@@ -237,31 +240,26 @@ async function fetchConfirmedQuote(symbol: string) {
     period2: period2.toISOString(),
   });
 
-  const rows = await yf.historical(symbol, {
+  const chart = await yf.chart(symbol, {
+    interval: '1d',
     period1,
     period2,
-    interval: '1d',
   });
+
+  const rows = chart.quotes ?? [];
 
   console.log('[fallback:rawRows]', {
     symbol,
-    rowCount: Array.isArray(rows) ? rows.length : 'not-array',
-    firstRow: Array.isArray(rows) && rows.length > 0 ? rows[0] : null,
-    lastRow: Array.isArray(rows) && rows.length > 0 ? rows[rows.length - 1] : null,
+    rowCount: rows.length,
+    firstRow: rows.length > 0 ? rows[0] : null,
+    lastRow: rows.length > 0 ? rows[rows.length - 1] : null,
   });
-
-  if (!rows || rows.length < 2) {
-    console.error('[fallback:error] rows不足', {
-      symbol,
-      rowCount: rows?.length ?? null,
-      rows,
-    });
-    throw new Error('確定データ不足');
-  }
 
   const validRows = rows.filter(
     (row) =>
       row &&
+      row.date !== null &&
+      row.date !== undefined &&
       row.open !== null &&
       row.open !== undefined &&
       row.close !== null &&
@@ -276,12 +274,6 @@ async function fetchConfirmedQuote(symbol: string) {
   });
 
   if (validRows.length < 2) {
-    console.error('[fallback:error] validRows不足', {
-      symbol,
-      validCount: validRows.length,
-      rows,
-      validRows,
-    });
     throw new Error('確定データ有効件数不足');
   }
 
@@ -293,35 +285,12 @@ async function fetchConfirmedQuote(symbol: string) {
   const lastOpen = Number(last.open);
   const lastVolume = Number(last.volume ?? 0);
 
-  console.log('[fallback:parsed]', {
-    symbol,
-    last,
-    prev,
-    lastClose,
-    prevClose,
-    lastOpen,
-    lastVolume,
-    isLastCloseFinite: Number.isFinite(lastClose),
-    isPrevCloseFinite: Number.isFinite(prevClose),
-    isLastOpenFinite: Number.isFinite(lastOpen),
-    isLastVolumeFinite: Number.isFinite(lastVolume),
-  });
-
   if (
     !Number.isFinite(lastClose) ||
     !Number.isFinite(prevClose) ||
     !Number.isFinite(lastOpen) ||
     !Number.isFinite(lastVolume)
   ) {
-    console.error('[fallback:error] 数値不正', {
-      symbol,
-      last,
-      prev,
-      lastClose,
-      prevClose,
-      lastOpen,
-      lastVolume,
-    });
     throw new Error('確定データ数値不正');
   }
 
@@ -337,6 +306,8 @@ async function fetchConfirmedQuote(symbol: string) {
 
   console.log('[fallback:success]', {
     symbol,
+    lastDate: last.date,
+    prevDate: prev.date,
     result,
   });
 
