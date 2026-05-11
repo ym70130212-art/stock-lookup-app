@@ -197,16 +197,26 @@ function getTodayRangeInJst() {
 
 function getHistoricalRange() {
   const now = new Date();
-  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-  const period2 = new Date(
-    yesterday.getFullYear(),
-    yesterday.getMonth(),
-    yesterday.getDate(),
-    23,
-    59,
-    59
-  );
+  const todayJstParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+
+  const map = Object.fromEntries(
+    todayJstParts
+      .filter((p) => p.type !== 'literal')
+      .map((p) => [p.type, p.value])
+  ) as Record<string, string>;
+
+  const todayJstYmd = `${map.year}-${map.month}-${map.day}`;
+
+  // 今日のJST 00:00をperiod2にする。
+  // これにより「今日の未確定日足」は除外しつつ、
+  // 直近の前営業日確定データを取得対象に含める。
+  const period2 = new Date(`${todayJstYmd}T00:00:00+09:00`);
 
   const period1 = new Date(period2.getTime() - 14 * 24 * 60 * 60 * 1000);
 
