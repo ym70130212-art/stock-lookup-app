@@ -366,19 +366,19 @@ async function fetchIntradayQuote(
   if (!resolved) {
     console.error('[intraday:error] 銘柄不明', { input });
 
-    return {
-      input,
-      code: '-',
-      name: '-',
-      price: null,
-      change: null,
-      changePercent: null,
-      openDiff: null,
-      openDiffPercent: null,
-      volume: null,
-      quoteTime: null,
-      failed: true,
-    };
+return {
+  input,
+  code: '-',
+  name: '-',
+  price: null,
+  change: null,
+  changePercent: null,
+  openDiff: null,
+  openDiffPercent: null,
+  totalVolume: null,
+  quoteTime: null,
+  error: '銘柄不明',
+};
   }
 
   code = resolved.code;
