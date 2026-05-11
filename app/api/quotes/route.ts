@@ -213,16 +213,13 @@ function getHistoricalRange() {
 
   const todayJstYmd = `${map.year}-${map.month}-${map.day}`;
 
-  // 今日のJST 00:00をperiod2にする。
-  // これにより「今日の未確定日足」は除外しつつ、
-  // 直近の前営業日確定データを取得対象に含める。
-  const period2 = new Date(`${todayJstYmd}T00:00:00+09:00`);
-
+  // Yahooの日足 timestamp がJST深夜〜午前側に寄ることがあるため、
+  // 00:00ではなく12:00を終点にして前営業日確定足を確実に含める。
+  const period2 = new Date(`${todayJstYmd}T12:00:00+09:00`);
   const period1 = new Date(period2.getTime() - 14 * 24 * 60 * 60 * 1000);
 
   return { period1, period2 };
 }
-
 function chunkArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < items.length; i += size) {
