@@ -381,9 +381,9 @@ return {
 };
   }
 
-  code = resolved.code;
-  name = resolved.name;
-  symbol = resolved.symbol;
+code = resolved.code;
+name = resolved.name;
+symbol = `${code}.T`;
 }
 
   try {
