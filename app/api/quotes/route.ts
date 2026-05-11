@@ -346,41 +346,45 @@ async function fetchIntradayQuote(
   let name = '';
   let symbol = '';
 
-  if (/^\d{4}$/.test(input)) {
-    code = input;
-    symbol = `${input}.T`;
+  if (/^\d{4}$|^\d{3}[A-Z]$/i.test(input)) {
+  code = input.toUpperCase();
+  symbol = `${code}.T`;
 
-    const matched = masterRows.find(
-      (row) => String(row.code) === String(code)
-    );
+  const matched = masterRows.find(
+    (row) =>
+      String(row.code).toUpperCase() === String(code)
+  );
 
-    if (matched) {
-      name = matched.name;
-    }
+  if (matched) {
+    name = matched.name;
   } else {
-    const resolved = resolveStockByName(input);
-
-    if (!resolved) {
-      console.error('[intraday:error] 銘柄不明', { input });
-      return {
-        input,
-        code: '-',
-        name: '-',
-        price: null,
-        change: null,
-        changePercent: null,
-        openDiff: null,
-        openDiffPercent: null,
-        totalVolume: null,
-        quoteTime: null,
-        error: '銘柄不明',
-      };
-    }
-
-    code = resolved.code;
-    name = resolved.name;
-    symbol = `${code}.T`;
+    name = code;
   }
+} else {
+  const resolved = resolveStockByName(input);
+
+  if (!resolved) {
+    console.error('[intraday:error] 銘柄不明', { input });
+
+    return {
+      input,
+      code: '-',
+      name: '-',
+      price: null,
+      change: null,
+      changePercent: null,
+      openDiff: null,
+      openDiffPercent: null,
+      volume: null,
+      quoteTime: null,
+      failed: true,
+    };
+  }
+
+  code = resolved.code;
+  name = resolved.name;
+  symbol = resolved.symbol;
+}
 
   try {
     const chart = await yf.chart(symbol, {
