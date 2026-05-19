@@ -8,12 +8,28 @@ type ApiResponse = {
 };
 
 const STORAGE_KEY = 'stock-input';
+const MAX_INPUTS = 100;
+
+function parseInputLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function countOutputStocks(text: string): number {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => /^\d{4}|^\d{3}[A-Z]/i.test(line.trim()))
+    .length;
+}
 
 export default function Page() {
   const [input, setInput] = useState('');
   const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
 
   useEffect(() => {
     try {
@@ -34,14 +50,29 @@ export default function Page() {
     }
   }, [input]);
 
+  const showNotice = (message: string) => {
+    setNotice(message);
+    window.setTimeout(() => {
+      setNotice('');
+    }, 2000);
+  };
+
   const handleFetch = async () => {
-    if (!input.trim()) {
+    const inputs = parseInputLines(input);
+
+    if (inputs.length === 0) {
       setError('入力してください');
+      return;
+    }
+
+    if (inputs.length > MAX_INPUTS) {
+      setError(`銘柄数が上限（${MAX_INPUTS}件）を超えています。${MAX_INPUTS}件以内にしてください。`);
       return;
     }
 
     setLoading(true);
     setError('');
+    setNotice('');
 
     try {
       const res = await fetch('/api/quotes', {
@@ -50,10 +81,7 @@ export default function Page() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          inputs: input
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter(Boolean),
+          inputs,
         }),
       });
 
@@ -79,6 +107,7 @@ export default function Page() {
     setInput('');
     setResult('');
     setError('');
+    setNotice('');
 
     try {
       localStorage.removeItem(STORAGE_KEY);
@@ -92,11 +121,20 @@ export default function Page() {
 
     try {
       await navigator.clipboard.writeText(result);
+
+      const count = countOutputStocks(result);
+      if (count > 0) {
+        showNotice(`コピーしました（${count}銘柄）`);
+      } else {
+        showNotice('コピーしました');
+      }
     } catch (e) {
       console.error(e);
       setError('コピーに失敗しました');
     }
   };
+
+  const inputCount = parseInputLines(input).length;
 
   return (
     <main style={{ maxWidth: 900, margin: '0 auto', padding: 16 }}>
@@ -106,9 +144,17 @@ export default function Page() {
         1行に1銘柄ずつ、銘柄コードまたは銘柄名を入力してください
       </p>
 
+      <p style={{ marginBottom: 8, color: inputCount > MAX_INPUTS ? 'crimson' : '#555' }}>
+        入力銘柄数: {inputCount} / {MAX_INPUTS}
+      </p>
+
       <textarea
         value={input}
-        onChange={(e) => setInput(e.target.value)}
+        onChange={(e) => {
+          setInput(e.target.value);
+          setError('');
+          setNotice('');
+        }}
         rows={10}
         style={{
           width: '100%',
@@ -133,6 +179,12 @@ export default function Page() {
           クリア
         </button>
       </div>
+
+      {notice && (
+        <div style={{ color: 'green', marginBottom: 12 }}>
+          {notice}
+        </div>
+      )}
 
       {error && (
         <div style={{ color: 'crimson', marginBottom: 12 }}>
